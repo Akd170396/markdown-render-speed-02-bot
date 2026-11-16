@@ -1339,13 +1339,16 @@ function isBlockStartLine(L) {
 // Lightweight tracker: does a sequence of block lines end with an open
 // paragraph? Used to decide lazy continuation lines.
 function makeTracker() {
-  return { inFence: false, fenceCh: '', fenceLen: 0, inPara: false, lastBlank: true, inCode: false };
+  return { inFence: false, fenceCh: '', fenceLen: 0, fenceInd: 0, fenceNested: false, inPara: false, lastBlank: true, inCode: false };
 }
 function trackerUpdate(tr, L) {
   // Strip nested blockquote/list markers: a lazy line after a nested
   // container continues the innermost paragraph, so track the innermost
   // content.
   let cur = L;
+  // Whether this line is nested deeper than the current container
+  // (its stripped content still starts with a blockquote marker).
+  const nestedHere = /^\s*>/.test(L.s);
   while (true) {
     const bq = matchBlockquote(cur);
     if (bq) { cur = bq; continue; }
@@ -1356,11 +1359,11 @@ function trackerUpdate(tr, L) {
   L = cur;
   if (isBlankLine(L)) { tr.lastBlank = true; tr.inCode = false; tr.inPara = false; return; }
   if (tr.inFence) {
-    if (isClosingFence(L, tr.fenceCh, tr.fenceLen)) tr.inFence = false;
+    if (isClosingFence(L, tr.fenceCh, tr.fenceLen)) { tr.inFence = false; tr.fenceNested = false; }
     tr.inPara = false; tr.lastBlank = false; tr.inCode = false; return;
   }
   const f = matchFence(L);
-  if (f) { tr.inFence = true; tr.fenceCh = f.ch; tr.fenceLen = f.len; tr.inPara = false; tr.lastBlank = false; tr.inCode = false; return; }
+  if (f) { tr.inFence = true; tr.fenceCh = f.ch; tr.fenceLen = f.len; tr.fenceInd = f.ind; tr.fenceNested = nestedHere; tr.inPara = false; tr.lastBlank = false; tr.inCode = false; return; }
   const ind = lineIndent(L);
   if (!tr.inPara && ind.cols >= 4 && (tr.lastBlank || tr.inCode)) { tr.inCode = true; tr.inPara = false; tr.lastBlank = false; return; }
   if (isBlockStartLine(L)) { tr.inPara = false; tr.lastBlank = false; tr.inCode = false; return; }
@@ -1563,6 +1566,11 @@ function parseBlockquote(lines, i, defs, collect) {
     const L = lines[j];
     const bq = matchBlockquote(L);
     if (bq) {
+      // A fence opened inside a NESTED blockquote ends when a line
+      // arrives at this (shallower) level: the nested blockquote, and
+      // everything in it including its fence, has ended. The stripped
+      // line still starts with '>' while nested deeper.
+      if (tr.inFence && tr.fenceNested && !bq.s.startsWith('>')) { tr.inFence = false; tr.fenceNested = false; }
       inner.push(bq);
       trackerUpdate(tr, bq);
       j++;
