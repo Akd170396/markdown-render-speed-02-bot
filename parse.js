@@ -601,8 +601,11 @@ function scanInline(src, defs) {
 
   // Consume a run of plain text starting at i, stopping at the next
   // character that needs special handling.
+  // Sticky email-autolink detector (no string slicing).
+  const EMAIL_RE = /[A-Za-z0-9.!#$%&'*+\/=?^_`{|}~-]+@[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?)+/y;
   function consumeTextRun() {
     const start = i;
+    let nextAt = src.indexOf('@', i);
     while (i < len) {
       const ch = src[i];
       if (ch === '\\' || ch === '`' || ch === '*' || ch === '_' || ch === '[' || ch === ']' || ch === '<' || ch === '\n') break;
@@ -620,19 +623,18 @@ function scanInline(src, defs) {
           if (ok) break;
         }
       }
-      if (i === 0 || !/[A-Za-z0-9.!#$%&'*+\/=?^_`{|}~-]/.test(src[i - 1]) || underscoreOpensEmphasis(src, i)) {
-        const at = src.indexOf('@', i);
-        if (at > i && at - i <= 64) {
-          const em = /^[A-Za-z0-9.!#$%&'*+\/=?^_`{|}~-]+@[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?)+/.exec(src.slice(i));
-          // A domain ending in '-' or '_' is not a valid email autolink.
-          // A '_' that closes an emphasis delimiter opened earlier is
-          // not part of the domain, so the email still breaks the run.
-          if (em) {
-            const nx = src[i + em[0].length];
-            if (nx !== '-' && (nx !== '_' || underscoreClosesEmphasis(tokens, i + em[0].length, src))) break;
-          }
+      if (nextAt > i && nextAt - i <= 64 && (i === 0 || !/[A-Za-z0-9.!#$%&'*+\/=?^_`{|}~-]/.test(src[i - 1]) || underscoreOpensEmphasis(src, i))) {
+        EMAIL_RE.lastIndex = i;
+        const em = EMAIL_RE.exec(src);
+        // A domain ending in '-' or '_' is not a valid email autolink.
+        // A '_' that closes an emphasis delimiter opened earlier is
+        // not part of the domain, so the email still breaks the run.
+        if (em) {
+          const nx = src[i + em[0].length];
+          if (nx !== '-' && (nx !== '_' || underscoreClosesEmphasis(tokens, i + em[0].length, src))) break;
         }
       }
+      if (nextAt >= 0 && i >= nextAt) nextAt = src.indexOf('@', i + 1);
       i++;
     }
     if (i > start) pushText(src.slice(start, i));
@@ -1160,13 +1162,17 @@ const BLOCK_TAGS = new Set(('address article aside base basefont blockquote body
 function matchHtmlStart(L) {
   const { ind, rest } = restAfterIndent(L);
   if (ind.cols > 3) return null;
+  const c1 = rest[1];
+  if (c1 === '!') {
+    if (rest.startsWith('<!--')) return { type: 2 };
+    if (rest.startsWith('<![CDATA[')) return { type: 5 };
+    if (/^<![A-Za-z]/.test(rest)) return { type: 4 };
+    return null;
+  }
+  if (c1 === '?') return rest.startsWith('<?') ? { type: 3 } : null;
   const lower = rest.toLowerCase();
   let m = /^<(script|pre|style|textarea)(?:[ \t>]|$)/.exec(lower);
   if (m) return { type: 1, tag: m[1] };
-  if (lower.startsWith('<!--')) return { type: 2 };
-  if (lower.startsWith('<?')) return { type: 3 };
-  if (/^<![a-z]/.test(lower)) return { type: 4 };
-  if (lower.startsWith('<![cdata[')) return { type: 5 };
   m = /^<\/?([a-z][a-z0-9-]*)(?:[ \t/>]|$)/.exec(lower);
   if (m && BLOCK_TAGS.has(m[1])) return { type: 6, tag: m[1] };
   // Type 7: a complete tag alone on the line.
@@ -1297,9 +1303,20 @@ function tryParseDef(lines, i, defs) {
 // Does a line start a block that can interrupt a paragraph (other than a
 // fenced code block, which callers check separately)?
 function isBlockStartLine(L) {
-  if (matchAtx(L) || isHrLine(L) || matchBlockquote(L) || matchListMarker(L) || matchSetext(L)) return true;
-  const h = matchHtmlStart(L);
-  return !!h && h.type !== 7;
+  const ind = lineIndent(L);
+  const fc = L.s[ind.pos];
+  if (fc === '#') return !!matchAtx(L);
+  if (fc === '>') return !!matchBlockquote(L);
+  if (fc === '<') { const h = matchHtmlStart(L); return !!h && h.type !== 7; }
+  if (fc === '`' || fc === '~') return false;
+  if (fc === '*' || fc === '-' || fc === '_') {
+    if (isHrLine(L)) return true;
+    if (fc !== '_' && matchListMarker(L)) return true;
+    return !!matchSetext(L);
+  }
+  if (fc === '=') return !!matchSetext(L);
+  if (fc >= '0' && fc <= '9') return !!matchListMarker(L);
+  return false;
 }
 
 // Lightweight tracker: does a sequence of block lines end with an open
@@ -1676,9 +1693,13 @@ function parseList(lines, i, defs, collect) {
   }
   // An item loosens its list only when its own top-level blocks are
   // separated by a blank line; a blank inside a nested block does not.
-  for (const item of items) {
-    const probe = parseBlocks(item.lines, defs, true, true, true, false, true);
-    if (probe.loose) { loose = true; break; }
+  // In collect mode looseness is irrelevant (no HTML is rendered), so
+  // skip the per-item probe parse entirely.
+  if (!collect) {
+    for (const item of items) {
+      const probe = parseBlocks(item.lines, defs, true, true, true, false, true);
+      if (probe.loose) { loose = true; break; }
+    }
   }
   let out = first.type === 'bullet' ? '<ul>\n' : (first.start !== 1 ? '<ol start="' + first.start + '">\n' : '<ol>\n');
   const tight = !loose;
@@ -1719,16 +1740,19 @@ function parseBlocks(lines, defs, tight, firstCheckbox, collect, topLevel, inLis
     if (ind.cols >= 4) {
       res = parseIndentedCode(lines, i);
     } else {
-      const f = matchFence(L);
+      // Fast dispatch on the first non-space char: skip matchers that
+      // cannot possibly match this line.
+      const fc = L.s[ind.pos];
+      const f = (fc === '`' || fc === '~') ? matchFence(L) : null;
       if (f) res = parseFenced(lines, i);
       else {
-        const atx = matchAtx(L);
+        const atx = fc === '#' ? matchAtx(L) : null;
         if (atx) res = { html: '<h' + atx.level + '>' + (collect ? '' : parseInline(atx.content, defs)) + '</h' + atx.level + '>\n', end: i + 1 };
-        else if (isHrLine(L)) res = { html: '<hr>\n', end: i + 1 };
-        else if (matchBlockquote(L)) res = parseBlockquote(lines, i, defs, collect);
-        else if (matchListMarker(L)) res = parseList(lines, i, defs, collect);
+        else if ((fc === '*' || fc === '-' || fc === '_') && isHrLine(L)) res = { html: '<hr>\n', end: i + 1 };
+        else if (fc === '>' && matchBlockquote(L)) res = parseBlockquote(lines, i, defs, collect);
+        else if ((fc === '-' || fc === '+' || fc === '*' || (fc >= '0' && fc <= '9')) && matchListMarker(L)) res = parseList(lines, i, defs, collect);
         else {
-          const h = matchHtmlStart(L);
+          const h = fc === '<' ? matchHtmlStart(L) : null;
           if (h) res = parseHtmlBlock(lines, i, topLevel);
         }
       }
