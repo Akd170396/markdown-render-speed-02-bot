@@ -1227,9 +1227,11 @@ function parseTable(lines, i, defs, collect) {
   const aligns = matchTableDelim(lines[i + 1]);
   const rows = [];
   let j = i + 2;
-  while (j < lines.length && !isBlankLine(lines[j])) {
+  while (j < lines.length && (!isBlankLine(lines[j]) || lines[j].s.includes('\t'))) {
     // A line that starts a block (blockquote, list, heading, fence, hr,
-    // html block, setext) ends the table; it is not a row.
+    // html block, setext) ends the table; it is not a row. A
+    // whitespace-only line holding a tab is an empty row, not a blank
+    // line (a spaces-only line does end the table).
     if (isBlockStartLine(lines[j]) || matchFence(lines[j])) break;
     rows.push(splitTableRow(lines[j].s.slice(lineIndent(lines[j]).pos)));
     j++;
@@ -1392,6 +1394,26 @@ function collectListItem(lines, start, marker) {
   while (j < lines.length) {
     const L = lines[j];
     if (isBlankLine(L)) { trailingBlanks++; j++; continue; }
+    // Inside a fenced code block, content lines belong to the item
+    // regardless of indentation (a fence's content need not be indented
+    // to the list content level); the fence closes on its own line.
+    if (tr.inFence) {
+      if (trailingBlanks > 0) {
+        for (let b = 0; b < trailingBlanks; b++) itemLines.push({ s: '', b: 0, nl: lines[j - trailingBlanks + b].nl });
+        trailingBlanks = 0;
+      }
+      let stripped = stripCols(L, marker.contentIndent);
+      while (stripped.s.startsWith('\t')) {
+        const w = 4 - (stripped.b % 4);
+        stripped = { s: ' '.repeat(w) + stripped.s.slice(1), b: stripped.b + w, nl: stripped.nl };
+      }
+      itemLines.push(stripped);
+      trackerUpdate(tr, stripped);
+      sawContent = true;
+      end = j + 1;
+      j++;
+      continue;
+    }
     const ind = lineIndent(L);
     if (ind.cols >= marker.contentIndent) {
       if (!sawContent && trailingBlanks > 0) break;
