@@ -1010,7 +1010,27 @@ function resolveDelimiters(tokens) {
       // blocks a lone '*' closer from stealing a delimiter from a '**'
       // opener beyond it.
       if (kind === 'em' && closer.canOpen) closeTok.canOpen = true;
-      tokens.splice(ci, 0, closeTok);
+      // A '***' closer on a '**' opener leaves one '*' behind. When
+      // the text right after the innermost em-close does not start
+      // with a space, that leftover '*' belongs INSIDE the strong
+      // (doc-11/30: '*b*c***' -> 'c*</strong>'); when it starts with
+      // a space it stays outside ('*b* c***' -> 'c</strong>*').
+      let closeAt = ci;
+      if (kind === 'strong' && closer.n === 3 && opener.n === 2) {
+        for (let k = ci - 1; k > oi; k--) {
+          if (tokens[k].t === 'em-close') {
+            // Skip past the spent inner-close delimiter(s) to the
+            // next real token; if it is text not starting with a
+            // space, the leftover '*' goes inside the strong.
+            let m = k + 1;
+            while (m < ci && tokens[m].t === 'delim') m++;
+            const after = tokens[m];
+            if (after && after.t === 'text' && after.s.length > 0 && after.s[0] !== ' ' && after.s[0] !== '\t' && after.s[0] !== '\n') closeAt = ci + 1;
+            break;
+          }
+        }
+      }
+      tokens.splice(closeAt, 0, closeTok);
       tokens.splice(oi + 1, 0, { t: kind + '-open' });
       opener.n -= use;
       closer.n -= use;
