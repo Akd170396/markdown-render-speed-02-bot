@@ -849,8 +849,9 @@ function resolveDelimiters(tokens) {
           // matching opener was preceded by whitespace opens a new scope
           // as well, so a lone '*' opener beyond it cannot pair with a
           // lone '*' closer outside it. It does not block a '**' closer
-          // (an outer strong still forms).
-          if (cand.t === 'strong-close' && cand.blocksOuter && closer.n === 1) depth++;
+          // (an outer strong still forms) nor a '_' closer (an outer
+          // '_' em still forms around it).
+          if (cand.t === 'strong-close' && cand.blocksOuter && closer.n === 1 && closer.ch === '*') depth++;
           continue;
         }
         if (/^(em|strong|del)-open$/.test(cand.t)) { depth--; continue; }
