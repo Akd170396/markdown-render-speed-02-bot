@@ -1247,7 +1247,14 @@ function matchSetext(L) {
 function matchBlockquote(L) {
   const { ind, rest } = restAfterIndent(L);
   if (ind.cols > 3 || rest[0] !== '>') return null;
-  const after = { s: rest.slice(1), b: L.b + ind.cols + 1, nl: L.nl };
+  // A tab right after '>' sits at the column after the '> ' marker
+  // (marker width 2), not right after the '>' itself: marked expands
+  // it from ind.cols+2, so a tab at ind.cols 7 leaves 2 spaces, not
+  // 3. Only when the tab is the sole whitespace after '>' (cm-006
+  // '>\t\tfoo' keeps the old column, else its code block loses a
+  // space).
+  const tabAfter = rest[1] === '\t' && rest[2] !== '\t';
+  const after = { s: rest.slice(1), b: L.b + ind.cols + (tabAfter ? 2 : 1), nl: L.nl };
   const stripped = stripCols(after, 1);
   // A tab in the leading whitespace after the '> ' marker is expanded
   // to spaces (to the next tab stop), not preserved as a tab. The
