@@ -845,13 +845,6 @@ function resolveDelimiters(tokens) {
         const cand = tokens[k];
         if (/^(em|strong|del)-close$/.test(cand.t)) {
           depth++;
-          // A strong closer that is followed by a letter/digit and whose
-          // matching opener was preceded by whitespace opens a new scope
-          // as well, so a lone '*' opener beyond it cannot pair with a
-          // lone '*' closer outside it. It does not block a '**' closer
-          // (an outer strong still forms) nor a '_' closer (an outer
-          // '_' em still forms around it).
-          if (cand.t === 'strong-close' && cand.blocksOuter && closer.n === 1 && closer.ch === '*') depth++;
           continue;
         }
         if (/^(em|strong|del)-open$/.test(cand.t)) { depth--; continue; }
@@ -869,6 +862,18 @@ function resolveDelimiters(tokens) {
           let blocked = false;
           for (let m = k + 1; m < ci; m++) {
             if (tokens[m].t === 'em-close' && tokens[m].canOpen) { blocked = true; break; }
+          }
+          if (blocked) continue;
+        }
+        // An em pairing (use 1) cannot cross a strong-close whose
+        // opener was open-only and whose closer is followed by a
+        // letter/digit: that strong opens a new scope for '*' (but
+        // not for '_' and not for a strong pairing, use 2).
+        const useHere = cand.n >= 2 && closer.n >= 2 ? 2 : 1;
+        if (useHere === 1 && closer.ch === '*') {
+          let blocked = false;
+          for (let m = k + 1; m < ci; m++) {
+            if (tokens[m].t === 'strong-close' && tokens[m].blocksOuter) { blocked = true; break; }
           }
           if (blocked) continue;
         }
