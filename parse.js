@@ -1122,11 +1122,13 @@ function matchBlockquote(L) {
   const after = { s: rest.slice(1), b: L.b + ind.cols + 1, nl: L.nl };
   const stripped = stripCols(after, 1);
   // A tab right after the '> ' marker is expanded to spaces (to the
-  // next tab stop from its column), not preserved as a tab. This is
-  // what turns a tab-indented fence-content line inside a blockquote
-  // into spaces.
+  // next tab stop), not preserved as a tab. The column is measured
+  // within this blockquote level's string (indent + '> ' = ind.cols+2
+  // chars before the tab), so a nested blockquote expands from its
+  // own level, not from the document column.
   if (stripped.s[0] === '\t') {
-    const w = 4 - (stripped.b % 4);
+    const col = ind.cols + 2;
+    const w = 4 - (col % 4);
     return { s: ' '.repeat(w) + stripped.s.slice(1), b: stripped.b + w, nl: stripped.nl };
   }
   return stripped;
