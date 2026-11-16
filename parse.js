@@ -419,18 +419,20 @@ function trimAutolinkEnd(s) {
 // Returns { t:'link', href, plain, end } or null.
 // An extended autolink must not swallow the ']' that closes a bracket
 // link when that ']' starts a valid link destination ('](' with a
-// valid destination, or ']['): truncate before such a ']' so the
-// bracket can close and the link can form. Otherwise a ']' followed
-// by '(' ends the autolink after the ']' unless the '(' is closed by
-// a ')' inside the autolink text itself (the '](...)' is part of the
-// URL, e.g. https://a.b/c](https://dest)); an unclosed '(' means the
+// valid destination, or '][') AND the bracket can still form (its
+// text holds no bracket link yet): truncate before such a ']' so the
+// bracket can close and the link can form. A bracket whose text
+// already holds a link cannot form, so its ']' stays in the autolink.
+// Otherwise a ']' followed by '(' ends the autolink after the ']'
+// unless the '(' is closed by a ')' inside the autolink text itself
+// (the '](...)' is part of the URL); an unclosed '(' means the
 // '](...)' is a link-like tail the autolink must not swallow.
-function truncateAtBracketClose(src, i, text, inBrackets) {
+function truncateAtBracketClose(src, i, text, inBrackets, bracketCanForm) {
   for (let k = 0; k < text.length; k++) {
     if (text[k] !== ']') continue;
     const nx = text[k + 1];
     if (nx === '(') {
-      if (inBrackets) {
+      if (inBrackets && bracketCanForm) {
         const d = parseInlineDest(src, i + k + 2);
         if (d) return text.slice(0, k);
       }
@@ -472,7 +474,18 @@ function underscoreOpensEmphasis(src, i) {
   while (j > 0 && src[j - 1] === '_') j--;
   return j === 0 || !/[A-Za-z0-9]/.test(src[j - 1]);
 }
-function matchExtendedAutolink(src, i, inBrackets, tokens) {
+// Whether the innermost open bracket can still form a link: its text
+// so far must hold no bracket link (an autolink inside does not block).
+function innermostBracketCanForm(brackets, tokens) {
+  if (brackets.length === 0) return false;
+  const openTok = brackets[brackets.length - 1];
+  const oi = tokens.indexOf(openTok);
+  for (let k = oi + 1; k < tokens.length; k++) {
+    if (tokens[k].t === 'link' && !tokens[k].auto) return false;
+  }
+  return true;
+}
+function matchExtendedAutolink(src, i, inBrackets, tokens, bracketCanForm) {
   // Suppressed while an unclosed <a> tag is open (document-wide state).
   if (inAnchor) return null;
   const rest = src.slice(i);
@@ -481,7 +494,7 @@ function matchExtendedAutolink(src, i, inBrackets, tokens) {
     const m = /^[A-Za-z0-9-]+(?:\.[A-Za-z0-9.-]*[A-Za-z0-9])?(?:[/?#][^\s<>]*)?/.exec(rest.slice(4));
     if (m) {
       let text = 'www.' + trimAutolinkEnd(m[0]);
-      text = truncateAtBracketClose(src, i, text, inBrackets);
+      text = truncateAtBracketClose(src, i, text, inBrackets, bracketCanForm);
       if (!text || text === 'www.') return null;
       return { t: 'link', href: encodeURI('http://' + text), title: null, plain: text, html: renderText(text), end: i + text.length, auto: 'ext' };
     }
@@ -491,7 +504,7 @@ function matchExtendedAutolink(src, i, inBrackets, tokens) {
   const sm = /^([A-Za-z][A-Za-z0-9+.-]{1,31}):\/\/[^\s<>]+/.exec(rest);
   if (sm) {
     let text = trimAutolinkEnd(sm[0]);
-    text = truncateAtBracketClose(src, i, text, inBrackets);
+    text = truncateAtBracketClose(src, i, text, inBrackets, bracketCanForm);
     if (!text) return null;
     return { t: 'link', href: encodeURI(text), title: null, plain: text, html: renderText(text), end: i + text.length, auto: 'ext' };
   }
@@ -766,11 +779,11 @@ function scanInline(src, defs) {
       continue;
     }
     if (ch === 'w' && src.startsWith('www.', i)) {
-      const auto = matchExtendedAutolink(src, i, brackets.length > 0, tokens);
+      const auto = matchExtendedAutolink(src, i, brackets.length > 0, tokens, innermostBracketCanForm(brackets, tokens));
       if (auto) { tokens.push(auto); i = auto.end; continue; }
     }
     if (isLetter(ch)) {
-      const auto = matchExtendedAutolink(src, i, brackets.length > 0, tokens);
+      const auto = matchExtendedAutolink(src, i, brackets.length > 0, tokens, innermostBracketCanForm(brackets, tokens));
       if (auto) { tokens.push(auto); i = auto.end; continue; }
     }
     const before = i;
@@ -1106,7 +1119,16 @@ function matchBlockquote(L) {
   const { ind, rest } = restAfterIndent(L);
   if (ind.cols > 3 || rest[0] !== '>') return null;
   const after = { s: rest.slice(1), b: L.b + ind.cols + 1, nl: L.nl };
-  return stripCols(after, 1);
+  const stripped = stripCols(after, 1);
+  // A tab right after the '> ' marker is expanded to spaces (to the
+  // next tab stop from its column), not preserved as a tab. This is
+  // what turns a tab-indented fence-content line inside a blockquote
+  // into spaces.
+  if (stripped.s[0] === '\t') {
+    const w = 4 - (stripped.b % 4);
+    return { s: ' '.repeat(w) + stripped.s.slice(1), b: stripped.b + w, nl: stripped.nl };
+  }
+  return stripped;
 }
 const BLOCK_TAGS = new Set(('address article aside base basefont blockquote body caption center col colgroup dd details dialog dir div dl dt fieldset figcaption figure footer form frame frameset h1 h2 h3 h4 h5 h6 head header hr html iframe legend li link main menu nav noframes ol optgroup option p param section source summary table tbody td tfoot th thead title tr track ul').split(' '));
 // HTML block start. Returns { type, tag } or null.
