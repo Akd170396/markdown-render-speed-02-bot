@@ -118,6 +118,35 @@ const ASCII_PUNCT = '!"#$%&\'()*+,-./:;<=>?@[\\]^_`{|}~';
 const TAG_RE = /^(?:<!--(?:-?>|[\s\S]*?-->)|^<\/[a-zA-Z][a-zA-Z0-9-]*\s*>|^<[a-zA-Z][a-zA-Z0-9-]*(?:\s+[a-zA-Z:_][\w.:-]*(?:\s*=\s*"[^"]*"|\s*=\s*'[^']*'|\s*=\s*[^\s"'=<>`]+)?)*\s*\/?>|^<\?[\s\S]*?\?>|^<![a-zA-Z]+\s[\s\S]*?>|^<!\[CDATA\[[\s\S]*?\]\]>)/;
 const AUTOLINK_RE = /^<([a-zA-Z][a-zA-Z0-9+.-]{1,31}:[^\s\x00-\x1f<>]*|[a-zA-Z0-9.!#$%&'*+/=?^_`{|}~-]+@[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?(?:\.[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?)+)>/;
 const EMAIL_RE = /^[A-Za-z0-9._+-]+@[a-zA-Z0-9-_]+(?:\.[a-zA-Z0-9-_]*[a-zA-Z0-9])+(?![\w-])/;
+// Greedy email match without the trailing lookahead. The reference strips
+// emphasis before it matches an email, so an address ending just before
+// an emphasis closer ('_' or '__' followed by a non-word character) is
+// the full address, while the lookahead regex above backtracks and drops
+// its last domain segment. That only holds when an underscore opener is
+// actually open (hasUnderscoreOpener): a trailing '_' with no opener is
+// literal text and the reference links nothing there.
+const EMAIL_FULL_RE = /^[A-Za-z0-9._+-]+@[a-zA-Z0-9-_]+(?:\.[a-zA-Z0-9-_]*[a-zA-Z0-9])+/;
+function matchEmail(s, hasUnderscoreOpener) {
+  const full = EMAIL_FULL_RE.exec(s);
+  if (!full) return null;
+  const after = s[full[0].length];
+  if (after === '_') {
+    if (!hasUnderscoreOpener) {
+      const m = EMAIL_RE.exec(s);
+      return m ? m[0] : null;
+    }
+    let q = full[0].length;
+    while (s[q] === '_') q++;
+    const next = s[q];
+    if (next === undefined || next === '' || !/[\w-]/.test(next)) return full[0];
+  } else if (after === undefined || after === '' || !/[\w-]/.test(after)) {
+    return full[0];
+  }
+  // Followed by a word character or '-': fall back to the lookahead
+  // regex, which backtracks (or fails) exactly as the reference does.
+  const m = EMAIL_RE.exec(s);
+  return m ? m[0] : null;
+}
 const SCHEME_RE = /^(?:https?|ftp):\/\//i;
 const WWW_RE = /^www\.(?:[a-zA-Z0-9-]+\.?)+[^\s<]*/;
 const SCHEME_URL_RE = /^(?:https?|ftp):\/\/(?:[a-zA-Z0-9-]+\.?)+[^\s<]*/i;
@@ -172,6 +201,11 @@ function labelEnd(src, open) {
     const c = src[k];
     if (c === '\\') { k += 2; continue; }
     if (c === '`') {
+      // The reference's label pattern consumes a backtick run as a
+      // code-span atom when ANY later backtick run follows (its closing
+      // run need not match the opening length), and consumes 2+ backticks
+      // immediately before ']'. A run with no later run and not before
+      // ']' cannot be in a label, so the label does not close here.
       let m = k;
       while (m < n && src[m] === '`') m++;
       const run = m - k;
@@ -181,11 +215,15 @@ function labelEnd(src, open) {
         if (src[j] === '`') {
           let e = j;
           while (e < n && src[e] === '`') e++;
-          if (e - j === run) { closed = e; break; }
-          j = e;
-        } else j++;
+          closed = e;
+          break;
+        }
+        j++;
       }
-      if (closed < 0) return -1;
+      if (closed < 0) {
+        if (run >= 2 && src[m] === ']') { k = m; continue; }
+        return -1;
+      }
       k = closed;
       continue;
     }
@@ -545,6 +583,11 @@ function inline(src, links, st, plain) {
   const toks = [];
   let head = -1;
   let tail = -1;
+  // Unmatched '_' openers seen so far in this inline string, simulated
+  // as the tokenizer goes (a closer consumes the most recent opener).
+  // Used only to tell an email followed by '_' whether that '_' can be
+  // an emphasis closer (the reference strips emphasis first).
+  let usOpen = 0;
   const push = (node) => {
     node.pv = tail;
     node.nx = -1;
@@ -682,6 +725,10 @@ function inline(src, links, st, plain) {
       }
       flushText(i);
       push({ k: 'd', c, n: len, open: canOpen, close: canClose });
+      if (c === '_') {
+        if (canClose && usOpen > 0) usOpen--;
+        if (canOpen) usOpen++;
+      }
       i = j;
       textStart = i;
       continue;
@@ -714,7 +761,10 @@ function inline(src, links, st, plain) {
           flushText(i);
           if (plain) pushText(url);
           else {
-            push({ k: 'h', s: '<a href="' + escText(url) + '">' + escText(url) + '</a>' });
+            // The reference encodes the href (encodeURI: ']' -> %5D,
+            // '\' -> %5C) while the link text stays the raw URL.
+            const enc = encodeHref(url);
+            push({ k: 'h', s: '<a href="' + escText(enc === null ? url : enc) + '">' + escText(url) + '</a>' });
             st.hasLink = true;
           }
           i += url.length;
@@ -732,7 +782,8 @@ function inline(src, links, st, plain) {
           flushText(i);
           if (plain) pushText(url);
           else {
-            push({ k: 'h', s: '<a href="http://' + escText(url) + '">' + escText(url) + '</a>' });
+            const enc = encodeHref('http://' + url);
+            push({ k: 'h', s: '<a href="' + escText(enc === null ? 'http://' + url : enc) + '">' + escText(url) + '</a>' });
             st.hasLink = true;
           }
           i += url.length;
@@ -758,10 +809,9 @@ function inline(src, links, st, plain) {
     }
     // --- email autolink (no brackets) ---
     if ((isWordCh(c) || c === '.' || c === '-' || c === '_' || c === '+' || c === '%') && !st.inLink) {
-      const em = EMAIL_RE.exec(src.slice(i));
-      if (em) {
+      const addr = matchEmail(src.slice(i), usOpen > 0);
+      if (addr) {
         flushText(i);
-        const addr = em[0];
         if (plain) pushText(addr);
         else {
           push({ k: 'h', s: '<a href="mailto:' + escText(addr) + '">' + escText(addr) + '</a>' });
@@ -1511,9 +1561,10 @@ function renderBlocks(src, links, tight, collectOnly, lazySet, inList, groupStar
         let text = lines.slice(i, j).join('\n');
         // The block's text ends with a newline only when it is followed
         // by no blank line (a non-blank line next, or end of input with
-        // a newline); a blank line after it swallows the newline.
+        // a newline). A truly empty line swallows the newline; a line
+        // holding only spaces or tabs does not (the reference keeps it).
         if (j < n) {
-          if (!isBlankLine(j)) text += '\n';
+          if (lines[j] !== '') text += '\n';
         } else if (src.endsWith('\n')) {
           text += '\n';
         }
@@ -1556,6 +1607,10 @@ function renderBlocks(src, links, tight, collectOnly, lazySet, inList, groupStar
 // ---------- entry point ----------
 
 export function parse(markdown) {
+  // The reference normalises line endings first (CRLF and lone CR become
+  // LF) before any lexing; without it a line ending in \r defeats the
+  // block regexes (`.` does not match \r).
+  markdown = markdown.replace(/\r\n?/g, '\n');
   const links = new Map();
   // First pass: collect link reference definitions for the whole document
   // (a definition after its use still resolves). The output is discarded.
