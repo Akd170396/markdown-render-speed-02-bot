@@ -428,7 +428,31 @@ function truncateAtBracketClose(text) {
   }
   return text;
 }
-function matchExtendedAutolink(src, i, inBrackets) {
+// An email followed by '_' is not an autolink (the domain would end
+// in '_') -- unless that '_' run closes an emphasis delimiter opened
+// earlier, in which case the '_' is a delimiter, not part of the word.
+// Returns true when an email ending at endPos may form despite the
+// following '_' run.
+function underscoreClosesEmphasis(tokens, endPos, src) {
+  let m = 0, k = endPos;
+  while (src[k] === '_') { m++; k++; }
+  if (m === 0) return false;
+  for (const t of tokens) {
+    if (t.t === 'delim' && t.ch === '_' && t.n >= m) return true;
+  }
+  return false;
+}
+// An email preceded by '_' is not an autolink (it would be part of a
+// larger word) -- unless that '_' run opens an emphasis delimiter, i.e.
+// the run sits at a word boundary (preceded by a non-word character or
+// the start of the string).
+function underscoreOpensEmphasis(src, i) {
+  if (src[i - 1] !== '_') return false;
+  let j = i - 1;
+  while (j > 0 && src[j - 1] === '_') j--;
+  return j === 0 || !/[A-Za-z0-9]/.test(src[j - 1]);
+}
+function matchExtendedAutolink(src, i, inBrackets, tokens) {
   // Suppressed while an unclosed <a> tag is open (document-wide state).
   if (inAnchor) return null;
   const rest = src.slice(i);
@@ -458,9 +482,10 @@ function matchExtendedAutolink(src, i, inBrackets) {
     const after = rest.slice(scm[0].length);
     const em2 = /^[A-Za-z0-9.!#$%&'*+\/=?^_`{|}~-]+@[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?)+/.exec(after);
     if (em2) {
-      // A domain ending in '-' or '_' is not a valid email.
+      // A domain ending in '-' or '_' is not a valid email -- unless
+      // the '_' closes an emphasis delimiter opened earlier.
       const nx = after[em2[0].length];
-      if (nx === '-' || nx === '_') return null;
+      if (nx === '-' || (nx === '_' && !underscoreClosesEmphasis(tokens, i + scm[0].length + em2[0].length, src))) return null;
       let text = scm[0] + em2[0];
       const p = after.slice(em2[0].length);
       const pm = /^\/[^\s<>\/]+/.exec(p);
@@ -472,14 +497,16 @@ function matchExtendedAutolink(src, i, inBrackets) {
     // so the email part alone is not linked either (the scheme stays).
     return null;
   }
-  // email (only at the start of a word)
-  if (i === 0 || !/[A-Za-z0-9.!#$%&'*+\/=?^_`{|}~-]/.test(src[i - 1])) {
+  // email (only at the start of a word, or right after an opening
+  // emphasis delimiter)
+  if (i === 0 || !/[A-Za-z0-9.!#$%&'*+\/=?^_`{|}~-]/.test(src[i - 1]) || underscoreOpensEmphasis(src, i)) {
     const em = /^[A-Za-z0-9.!#$%&'*+\/=?^_`{|}~-]+@[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?)+/.exec(rest);
     if (em) {
       // A domain ending in '-' or '_' is not a valid email: the whole
-      // thing is literal, not a trimmed autolink.
+      // thing is literal, not a trimmed autolink -- unless the '_'
+      // closes an emphasis delimiter opened earlier.
       const nx = rest[em[0].length];
-      if (nx === '-' || nx === '_') return null;
+      if (nx === '-' || (nx === '_' && !underscoreClosesEmphasis(tokens, i + em[0].length, src))) return null;
       const text = em[0];
       return { t: 'link', href: 'mailto:' + text, title: null, plain: text, html: renderText(text), end: i + text.length, auto: 'ext' };
     }
@@ -543,14 +570,16 @@ function scanInline(src, defs) {
           if (ok) break;
         }
       }
-      if (i === 0 || !/[A-Za-z0-9.!#$%&'*+\/=?^_`{|}~-]/.test(src[i - 1])) {
+      if (i === 0 || !/[A-Za-z0-9.!#$%&'*+\/=?^_`{|}~-]/.test(src[i - 1]) || underscoreOpensEmphasis(src, i)) {
         const at = src.indexOf('@', i);
         if (at > i && at - i <= 64) {
           const em = /^[A-Za-z0-9.!#$%&'*+\/=?^_`{|}~-]+@[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?)+/.exec(src.slice(i));
           // A domain ending in '-' or '_' is not a valid email autolink.
+          // A '_' that closes an emphasis delimiter opened earlier is
+          // not part of the domain, so the email still breaks the run.
           if (em) {
             const nx = src[i + em[0].length];
-            if (nx !== '-' && nx !== '_') break;
+            if (nx !== '-' && (nx !== '_' || underscoreClosesEmphasis(tokens, i + em[0].length, src))) break;
           }
         }
       }
@@ -717,11 +746,11 @@ function scanInline(src, defs) {
       continue;
     }
     if (ch === 'w' && src.startsWith('www.', i)) {
-      const auto = matchExtendedAutolink(src, i, brackets.length > 0);
+      const auto = matchExtendedAutolink(src, i, brackets.length > 0, tokens);
       if (auto) { tokens.push(auto); i = auto.end; continue; }
     }
     if (isLetter(ch)) {
-      const auto = matchExtendedAutolink(src, i, brackets.length > 0);
+      const auto = matchExtendedAutolink(src, i, brackets.length > 0, tokens);
       if (auto) { tokens.push(auto); i = auto.end; continue; }
     }
     const before = i;
