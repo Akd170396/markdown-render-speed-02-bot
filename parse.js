@@ -1,5 +1,8 @@
 // parse.js — a fast CommonMark 0.31.2 + GFM 0.29 renderer whose parse()
 // returns exactly the HTML marked 18.1.3 renders with its default options
+// Approach: block structure first (definitions collected document-wide),
+// then inline rendering with an outermost-first delimiter stack, so plain
+// paragraphs never pay for delimiter bookkeeping.
 // (gfm on, breaks off, pedantic off, async off).
 //
 // Written from the CommonMark and GFM specifications and the reference
