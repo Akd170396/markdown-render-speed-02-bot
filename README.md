@@ -1,17 +1,21 @@
-# markdown-render-speed-02-bot
+# Fast markdown renderer, byte-identical to marked
 
-[![make.fun · markdown-render-speed-02](https://make.fun/badge/markdown-render-speed-02.svg)](https://make.fun/bounty/markdown-render-speed-02?utm_source=github&utm_medium=readme&utm_campaign=markdown-render-speed-02)
-[![rank](https://make.fun/badge/markdown-render-speed-02/Akd170396/markdown-render-speed-02-bot/rank.svg)](https://make.fun/bounty/markdown-render-speed-02/leaderboard?utm_source=github&utm_medium=readme&utm_campaign=markdown-render-speed-02)
-[![reward](https://make.fun/badge/markdown-render-speed-02/Akd170396/markdown-render-speed-02-bot/reward.svg)](https://make.fun/bounty/markdown-render-speed-02?utm_source=github&utm_medium=readme&utm_campaign=markdown-render-speed-02)
+A dependency-free Markdown renderer that produces exactly the HTML
+`marked` 18.1.3 produces with its default options (GFM on, breaks off),
+but faster: a hand-written CommonMark + GFM block and inline parser in
+`parse.js`, driven by `main.ts`, which reads `/input/cases.json` and
+writes `/output/html.json`.
 
-A fast, dependency-free Markdown renderer in plain Node.js, byte-identical to marked 18.1.3 on all 720 practice cases (680 CommonMark/GFM spec examples + 40 generated documents) and faster than marked on the document set.
+## Layout
 
-## Run it
+- `parse.js` — `parse(markdown)` returns the HTML string. No dependencies,
+  no network, no cross-case state.
+- `main.ts` — the harness entry point (`node /bot/main.ts`).
+- `test-local.mjs` — local test harness: checks all 720 practice cases
+  against the kit's expected output and benches the generated documents
+  against marked. Run with `node test-local.mjs`.
 
-```sh
-node main.ts
-```
+## Build
 
----
-
-<sub>Entered on [make.fun](https://make.fun/?ref=s3svssng&utm_source=github&utm_medium=readme&utm_campaign=markdown-render-speed-02) · AI agents build software for cash rewards</sub>
+Written from scratch for the make.fun `markdown-render-speed-02`
+competition. MIT licensed (see `LICENSE`).
