@@ -1011,6 +1011,31 @@ function parseList(lines, i, links, collectOnly, docSt) {
   let curCI = first.contentIndent;
   let loose = false;
   let lastWasBlank = false;
+  // Fenced code block state inside the current item (for the lazy-line
+  // rule): a lazy line right after a fence opener, before any indented
+  // content line, is not fence content -- the fence is empty and the
+  // list ends. Once the fence has an indented content line, later lazy
+  // lines are code content.
+  let fenceCh = null;
+  let fenceLen = 0;
+  let fenceHasContent = false;
+  const trackFence = (line) => {
+    const c = stripIndent(line, 3);
+    if (fenceCh !== null) {
+      const cm = /^(`{3,}|~{3,})[ \t]*$/.exec(c);
+      if (cm && cm[1][0] === fenceCh && cm[1].length >= fenceLen) {
+        fenceCh = null; fenceLen = 0; fenceHasContent = false;
+      } else {
+        fenceHasContent = true;
+      }
+      return;
+    }
+    const fm = /^(`{3,}|~{3,})([^\n]*)$/.exec(c);
+    if (fm && !(fm[1][0] === '`' && fm[2].includes('`'))) {
+      fenceCh = fm[1][0]; fenceLen = fm[1].length; fenceHasContent = false;
+    }
+  };
+  trackFence(first.content);
   let j = i + 1;
   const finishItem = () => {
     while (curLines.length && curLines[curLines.length - 1] === '') curLines.pop();
@@ -1036,6 +1061,8 @@ function parseList(lines, i, links, collectOnly, docSt) {
           curLazy = new Set();
           curCI = nm.contentIndent;
           lastWasBlank = false;
+          fenceCh = null; fenceLen = 0; fenceHasContent = false;
+          trackFence(nm.content);
           j = k + 1;
           continue;
         }
@@ -1048,6 +1075,8 @@ function parseList(lines, i, links, collectOnly, docSt) {
         curLazy = new Set();
         curCI = nm.contentIndent;
         lastWasBlank = false;
+        fenceCh = null; fenceLen = 0; fenceHasContent = false;
+        trackFence(nm.content);
         j = k + 1;
         continue;
       }
@@ -1064,7 +1093,9 @@ function parseList(lines, i, links, collectOnly, docSt) {
     const ind = indentColumns(ln);
     if (ind >= curCI) {
       const Z = ln.replace(/^[ \t]+/, (mm) => J(mm, 0));
-      curLines.push(Z.slice(curCI));
+      const contentLine = Z.slice(curCI);
+      curLines.push(contentLine);
+      trackFence(contentLine);
       lastWasBlank = false;
       j++;
       continue;
@@ -1080,6 +1111,8 @@ function parseList(lines, i, links, collectOnly, docSt) {
         curLazy = new Set();
         curCI = m.contentIndent;
         lastWasBlank = false;
+        fenceCh = null; fenceLen = 0; fenceHasContent = false;
+        trackFence(m.content);
         j++;
         continue;
       }
@@ -1087,6 +1120,10 @@ function parseList(lines, i, links, collectOnly, docSt) {
     }
     // lazy paragraph continuation, or the list ends
     if (lastWasBlank) break;
+    // A lazy line right after a fence opener (the fence has no content
+    // line yet) is not fence content: the fence is empty and the list
+    // ends here; the lazy line belongs to the outer context.
+    if (fenceCh !== null && !fenceHasContent) break;
     // A lazy line can only interrupt the paragraph when its block start
     // sits at an indent the reference allows (its D-clamped limit:
     // at most 3, and at most one less than the item's content indent).
@@ -1104,6 +1141,7 @@ function parseList(lines, i, links, collectOnly, docSt) {
       curLines.push(ln);
       curLazy.add(curLines.length - 1);
     }
+    if (fenceCh !== null) fenceHasContent = true;
     lastWasBlank = false;
     j++;
   }
