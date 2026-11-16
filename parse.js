@@ -454,7 +454,12 @@ function resolveEmphasis(toks, head, plain) {
   // longer be closed by a lone delimiter -- only a run of 2+ still can.
   // (This is what leaves the stray `*` literal in `**a *b*c* d**` and
   // the outer `*` literal in `*a **b**c*`.)
+  // A leftover closer -- the remainder of a run that just matched an
+  // inner opener (e.g. the last `*` of `***` after `**` took two) -- is
+  // not blocked: it is the same run continuing, so it may still close an
+  // earlier opener (this is how `*a **b***` nests em around strong).
   const blockedSingle = new Set();
+  let leftoverNode = -1;
   let cur = head;
   while (cur !== -1) {
     const node = toks[cur];
@@ -465,8 +470,9 @@ function resolveEmphasis(toks, head, plain) {
           const op = toks[stack[s]];
           if (op.c !== node.c) continue;
           // A lone closer cannot match an opener blocked by an earlier
-          // both-open-and-close delimiter; a run of 2+ still can.
-          if (node.n < 2 && blockedSingle.has(stack[s])) continue;
+          // both-open-and-close delimiter; a run of 2+ still can. A
+          // leftover closer (same run, re-processed) is exempt.
+          if (node.n < 2 && cur !== leftoverNode && blockedSingle.has(stack[s])) continue;
           // Rule of 3: when either delimiter can both open and close,
           // a match whose run lengths sum to a multiple of 3 is barred
           // unless both lengths are multiples of 3.
@@ -539,12 +545,16 @@ function resolveEmphasis(toks, head, plain) {
             stack.length = oi + (op.n > 0 ? 1 : 0);
             // A leftover closer is re-processed: it may still match an
             // earlier opener (this is how ***foo*** nests em around strong).
+            // Mark it as a leftover so the blockedSingle check is skipped
+            // for this same run.
+            leftoverNode = node.n > 0 ? cur : -1;
             cur = node.n > 0 ? cur : after;
             continue;
           }
         }
       }
       if (node.open) stack.push(cur);
+      leftoverNode = -1;
       cur = toks[cur].nx;
     } else {
       cur = toks[cur].nx;
