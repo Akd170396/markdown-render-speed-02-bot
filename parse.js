@@ -195,7 +195,7 @@ function unescapeBackslashes(s) {
 function cleanUrl(url) {
   let u = url.replace(/^[\u0000-\u0020]+/, '');
   if (/^(?:javascript|vbscript|data):/i.test(u)) return null;
-  return u;
+  return encodeURI(u).replace(/%25/g, '%');
 }
 
 // Normalize a link reference label: casefold and collapse whitespace runs.
@@ -835,10 +835,11 @@ function parseDestAndTitle(s, k) {
     if (m === k) return null;
     k = m;
   }
+  const destEnd = k;
   let title = null;
   let save = k;
   while (k < len && (s[k] === ' ' || s[k] === '\t' || s[k] === '\n')) k++;
-  if (k < len && (s[k] === '"' || s[k] === "'" || s[k] === '(')) {
+  if (k > save && k < len && (s[k] === '"' || s[k] === "'" || s[k] === '(')) {
     const q = s[k];
     const close = q === '(' ? ')' : q;
     let m = k + 1, t = '', ok = false, depth = 1;
@@ -857,7 +858,7 @@ function parseDestAndTitle(s, k) {
   } else {
     k = save;
   }
-  return { href, title, end: k };
+  return { href, title, end: k, destEnd };
 }
 
 function matchFence(L) {
@@ -868,7 +869,7 @@ function matchFence(L) {
   const ch = m[1][0], len = m[1].length;
   const info = rest.slice(len).replace(/^[ \t]+/, '').replace(/[ \t]+$/, '');
   if (ch === '`' && info.indexOf('`') >= 0) return null;
-  return { ch, len, info };
+  return { ch, len, info, ind: ind.cols };
 }
 function isClosingFence(L, ch, len) {
   const { ind, rest } = restAfterIndent(L);
@@ -986,10 +987,19 @@ function tryParseDef(lines, i, defs) {
   const L = lines[i];
   const { ind, rest } = restAfterIndent(L);
   if (ind.cols > 3 || rest[0] !== '[') return null;
+  // Join following lines so the label, destination or title may sit on a
+  // later line; a blank line ends the definition.
+  let text = rest;
+  let linesUsed = 1;
+  for (let k = 1; k <= 9 && i + k < lines.length; k++) {
+    if (isBlankLine(lines[i + k])) break;
+    text += '\n' + lines[i + k].s;
+    linesUsed = k + 1;
+  }
   let depth = 0, k = 0, label = '', closed = -1;
-  for (k = 0; k < rest.length; k++) {
-    const c = rest[k];
-    if (c === '\\' && k + 1 < rest.length && isPunct(rest[k + 1])) { label += rest[k + 1]; k++; continue; }
+  for (k = 0; k < text.length; k++) {
+    const c = text[k];
+    if (c === '\\' && k + 1 < text.length && isPunct(text[k + 1])) { label += text[k + 1]; k++; continue; }
     if (c === '[') { depth++; if (depth > 1) label += c; continue; }
     if (c === ']') {
       depth--;
@@ -999,24 +1009,28 @@ function tryParseDef(lines, i, defs) {
     label += c;
   }
   if (closed < 0 || label === '' || label.length > 999) return null;
+  const key = normalizeLabel(label);
+  if (key === '') return null;
   let m = closed + 1;
-  while (m < rest.length && (rest[m] === ' ' || rest[m] === '\t')) m++;
-  if (rest[m] !== ':') return null;
+  while (m < text.length && (text[m] === ' ' || text[m] === '\t')) m++;
+  if (text[m] !== ':') return null;
   m++;
-  // Join up to 3 lines so the destination/title may sit on a later line.
-  let text = rest.slice(m);
-  let linesUsed = 1;
-  if (i + 1 < lines.length) { text += '\n' + lines[i + 1].s; linesUsed = 2; }
-  if (i + 2 < lines.length) { text += '\n' + lines[i + 2].s; linesUsed = 3; }
-  const d = parseDestAndTitle(text, 0);
+  let d = parseDestAndTitle(text, m);
   if (!d) return null;
-  // After the title only whitespace may follow on its line.
+  // After the title only whitespace may follow on its line. When a title
+  // is present but junk follows it, the definition still holds without
+  // the title (the title's line becomes a paragraph).
   let e = d.end;
   while (e < text.length && (text[e] === ' ' || text[e] === '\t')) e++;
-  if (e < text.length && text[e] !== '\n') return null;
+  if (e < text.length && text[e] !== '\n') {
+    if (d.title === null) return null;
+    d = { href: d.href, title: null, end: d.destEnd, destEnd: d.destEnd };
+    e = d.end;
+    while (e < text.length && (text[e] === ' ' || text[e] === '\t')) e++;
+    if (e < text.length && text[e] !== '\n') return null;
+  }
   const consumed = text.slice(0, e).split('\n').length;
   if (consumed > linesUsed) return null;
-  const key = normalizeLabel(label);
   if (!defs.has(key)) defs.set(key, { href: unescapeEntities(d.href), title: d.title !== null ? unescapeEntities(d.title) : null });
   return { consumed, label: key };
 }
@@ -1055,7 +1069,7 @@ function parseFenced(lines, i) {
   const content = [];
   while (j < lines.length) {
     if (isClosingFence(lines[j], f.ch, f.len)) break;
-    content.push(lines[j].s);
+    content.push(stripCols(lines[j], f.ind).s);
     j++;
   }
   const end = j < lines.length ? j + 1 : j;
@@ -1079,7 +1093,7 @@ function parseIndentedCode(lines, i) {
   content.length = lastContent - i + 1;
   return { html: '<pre><code>' + escapeAll(content.length ? content.join('\n') + '\n' : '') + '</code></pre>\n', end: lastContent + 1 };
 }
-function parseHtmlBlock(lines, i) {
+function parseHtmlBlock(lines, i, topLevel) {
   const h = matchHtmlStart(lines[i]);
   const endTest = (idx) => {
     const s = lines[idx].s;
@@ -1103,7 +1117,8 @@ function parseHtmlBlock(lines, i) {
   for (let k = i; k < j; k++) {
     html += lines[k].s;
     if (k + 1 < j) html += '\n';
-    else if (lines[k].nl && (j >= lines.length || !isBlankLine(lines[j]))) html += '\n';
+    else if (lines[k].nl && j < lines.length && !isBlankLine(lines[j])) html += '\n';
+    else if (topLevel && lines[k].nl && j >= lines.length) html += '\n';
   }
   return { html, end: j };
 }
@@ -1159,7 +1174,7 @@ function parseParagraph(lines, i, defs, tight, firstCheckbox, collect) {
   let tableAt = -1;
   while (j < lines.length) {
     const L = lines[j];
-    if (isBlankLine(L)) break;
+    if (isBlankLine(L) && !L.keepSpace) break;
     if (L.endsPara) { para.push(L); j++; break; }
     const ind = lineIndent(L);
     if (ind.cols <= 3) {
@@ -1177,7 +1192,7 @@ function parseParagraph(lines, i, defs, tight, firstCheckbox, collect) {
       // or list item) only breaks out when its cell count matches the
       // delimiter's column count.
       const nx = lines[j + 1];
-      const nal = nx ? matchTableDelim(nx) : null;
+      const nal = nx && !matchSetext(nx) ? matchTableDelim(nx) : null;
       if (nal) {
         if (!L.lazy) break;
         const hdrCells = splitTableRow(L.s.slice(ind.pos));
@@ -1187,7 +1202,7 @@ function parseParagraph(lines, i, defs, tight, firstCheckbox, collect) {
       const h = matchHtmlStart(L);
       if (h && h.type !== 7) break;
       const m = matchListMarker(L);
-      if (m && canInterruptParagraphList(lines, j, m)) break;
+      if (m && !L.lazy && canInterruptParagraphList(lines, j, m)) break;
     }
     para.push(L);
     j++;
@@ -1225,15 +1240,7 @@ function parseBlockquote(lines, i, defs, collect) {
       j++;
       continue;
     }
-    if (isBlankLine(L)) {
-      let k = j + 1;
-      while (k < lines.length && isBlankLine(lines[k])) k++;
-      if (k < lines.length && matchBlockquote(lines[k])) {
-        while (j < k) { inner.push({ s: '', b: 0, nl: lines[j].nl }); trackerUpdate(tr, { s: '', b: 0, nl: false }); j++; }
-        continue;
-      }
-      break;
-    }
+    if (isBlankLine(L)) break;
     if (tr.inPara && !matchFence(L)) {
       // A lazy '=' setext underline is kept as paragraph text by indenting
       // it four spaces, so it cannot turn the paragraph into a heading.
@@ -1245,7 +1252,9 @@ function parseBlockquote(lines, i, defs, collect) {
         continue;
       }
       if (!isBlockStartLine(L)) {
-        const lazyLine = { ...L, lazy: 'bq' };
+        const ind = lineIndent(L);
+        const base = ind.cols >= 4 ? stripCols(L, 4) : L;
+        const lazyLine = { ...base, lazy: 'bq' };
         inner.push(lazyLine);
         trackerUpdate(tr, lazyLine);
         j++;
@@ -1254,7 +1263,9 @@ function parseBlockquote(lines, i, defs, collect) {
     }
     break;
   }
-  const innerParsed = parseBlocks(inner, defs, false, false, collect);
+  const lastInner = inner[inner.length - 1];
+  if (lastInner && lastInner.s !== '' && isBlankLine(lastInner)) lastInner.keepSpace = true;
+  const innerParsed = parseBlocks(inner, defs, false, false, collect, false);
   return { html: '<blockquote>\n' + innerParsed.html + '</blockquote>\n', end: j };
 }
 
@@ -1346,14 +1357,14 @@ function parseList(lines, i, defs, collect) {
   let out = first.type === 'bullet' ? '<ul>\n' : (first.start !== 1 ? '<ol start="' + first.start + '">\n' : '<ol>\n');
   const tight = !loose;
   for (const item of items) {
-    const parsed = parseBlocks(item.lines, defs, tight, true, collect);
+    const parsed = parseBlocks(item.lines, defs, tight, true, collect, false);
     out += '<li>' + parsed.html + '</li>\n';
   }
   out += first.type === 'bullet' ? '</ul>\n' : '</ol>\n';
   return { html: out, end: j };
 }
 
-function parseBlocks(lines, defs, tight, firstCheckbox, collect) {
+function parseBlocks(lines, defs, tight, firstCheckbox, collect, topLevel) {
   let out = '';
   let seenBlock = false;
   let seenBlankAfterBlock = false;
@@ -1383,7 +1394,7 @@ function parseBlocks(lines, defs, tight, firstCheckbox, collect) {
         else if (matchListMarker(L)) res = parseList(lines, i, defs, collect);
         else {
           const h = matchHtmlStart(L);
-          if (h) res = parseHtmlBlock(lines, i);
+          if (h) res = parseHtmlBlock(lines, i, topLevel);
         }
       }
     }
@@ -1417,6 +1428,6 @@ export function parse(src) {
   // Two passes: first collect every link reference definition in the
   // document (a definition may sit after the paragraph that uses it),
   // then render with the complete map.
-  parseBlocks(lines, defs, false, false, true);
-  return parseBlocks(lines, defs, false, false, false).html;
+  parseBlocks(lines, defs, false, false, true, true);
+  return parseBlocks(lines, defs, false, false, false, true).html;
 }
