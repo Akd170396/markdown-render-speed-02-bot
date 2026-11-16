@@ -156,6 +156,15 @@ const SCHEME_URL_RE = /^(?:https?|ftp):\/\/(?:[a-zA-Z0-9-]+\.?)+[^\s<]*/i;
 const MAILTO_RE = /^(?:mailto:[A-Za-z0-9._+-]+@[a-zA-Z0-9-_]+(?:\.[a-zA-Z0-9-_]*[a-zA-Z0-9])+(?![\w-])|xmpp:[A-Za-z0-9._+-]+@[a-zA-Z0-9-_]+(?:\.[a-zA-Z0-9-_]*[a-zA-Z0-9])+(?![\w-])(?:\/[A-Za-z0-9@.]+)?)/;
 const CODE_SPAN_RE = /^(`+)([^`]|[^`][\s\S]*?[^`])\1(?!`)/;
 const BR_RE = /^( {2,}|\\)\n(?!\s*$)/;
+// Next position in an inline string where the tokenizer must stop: a
+// markup char, a hard-break candidate (two spaces before a newline),
+// an extended-autolink prefix, or '@' (a bare email). Plain text
+// between such positions needs no per-character work.
+const INLINE_NEXT_RE = /[\\`*<\[!_~]| {2,}(?=\n)|[Hh][Tt][Tt][Pp][Ss]?:\/\/|[Ff][Tt][Pp]:\/\/|www\.|mailto:|xmpp:|@/g;
+// A char of an email local part (the set before '@' in EMAIL_FULL_RE).
+function isLocalPartCh(ch) {
+  return (ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') || (ch >= '0' && ch <= '9') || ch === '.' || ch === '_' || ch === '+' || ch === '-';
+}
 const ESCAPE_RE = /^\\([!"#$%&'()*+,\-./:;<=>?@\[\\\]^_`{|}~])/;
 const DEL_RE = /^(~~?)(?=[^\s~])((?:\\[\s\S]|[^\\])*?(?:\\[\s\S]|[^\s~\\]))\1(?=[^~]|$)/;
 
@@ -441,15 +450,6 @@ function tryLink(src, i, links, st, plain) {
   return { html: out, end };
 }
 
-// Run the del pass on a node list and, recursively, inside every
-// wrapper's children (a `~~` inside a strong is resolved when the
-// reference re-tokenizes the strong's content).
-function resolveDelDeep(nodes, plain) {
-  resolveDel(nodes, plain);
-  for (const node of nodes) {
-    if (node.ch) resolveDelDeep(node.ch, plain);
-  }
-}
 
 // --- emphasis resolution: the reference's emStrong algorithm ---
 //
@@ -920,6 +920,10 @@ function inline(src, links, st, plain) {
   };
   let i = 0;
   let textStart = 0;
+  // Cache for the email pre-check: the end of the current local-part
+  // run and the last '@' inside it (see the email branch below).
+  let emailRunEnd = -1;
+  let emailRunLastAt = -1;
   const flushText = (to) => {
     if (to > textStart) pushText(src.slice(textStart, to));
   };
@@ -933,6 +937,67 @@ function inline(src, links, st, plain) {
     return false;
   };
   while (i < n) {
+    // Fast path: jump to the next position that needs handling. The
+    // text before it is plain (no markup char, no autolink prefix,
+    // no '@'); it stays in [textStart, i) and is flushed when the
+    // token at the stop position is processed.
+    INLINE_NEXT_RE.lastIndex = i;
+    const nm = INLINE_NEXT_RE.exec(src);
+    if (!nm) { i = n; break; }
+    const stopAt = nm.index;
+    if (nm[0] === '@') {
+      // Bare email (disabled inside a link: the reference's inLink
+      // state, which tryLink sets while rendering a label).
+      if (st.inLink) { i = stopAt + 1; continue; }
+      // Find the start of the local-part run ending here.
+      let s = stopAt;
+      while (s > 0 && isLocalPartCh(src[s - 1])) s--;
+      if (s < i) {
+        // The run starts before the current position: its email was
+        // already checked when the loop was there. Treat '@' as text.
+        i = stopAt + 1;
+        continue;
+      }
+      const addr = matchEmail(src.slice(s), usOpen > 0);
+      if (addr) {
+        flushText(s);
+        if (plain) pushText(addr);
+        else {
+          push({ k: 'h', s: '<a href="mailto:' + escText(addr) + '">' + escText(addr) + '</a>' });
+          st.hasLink = true;
+        }
+        i = s + addr.length;
+        textStart = i;
+        continue;
+      }
+      i = stopAt + 1;
+      continue;
+    }
+    // Pending email check: only a '_' delimiter can sit inside an email
+    // local part, so only when stopping at one do we check whether an
+    // email starting before it (and spanning it) takes precedence.
+    if (nm[0] === '_' && stopAt > i && !st.inLink) {
+      const atPos = src.indexOf('@', i);
+      if (atPos !== -1 && atPos > stopAt) {
+        let s = atPos;
+        while (s > 0 && isLocalPartCh(src[s - 1])) s--;
+        if (s >= i && s < stopAt) {
+          const addr = matchEmail(src.slice(s), usOpen > 0);
+          if (addr) {
+            flushText(s);
+            if (plain) pushText(addr);
+            else {
+              push({ k: 'h', s: '<a href="mailto:' + escText(addr) + '">' + escText(addr) + '</a>' });
+              st.hasLink = true;
+            }
+            i = s + addr.length;
+            textStart = i;
+            continue;
+          }
+        }
+      }
+    }
+    i = stopAt;
     const c = src[i];
     // --- hard break: two or more spaces + newline. The leading
     // whitespace of the next line is stripped after a hard break. ---
@@ -1087,6 +1152,18 @@ function inline(src, links, st, plain) {
     // email anywhere. On a miss, fall through so a word starting with
     // h/f/w/m/x can still be an email. ---
     if ((c === 'h' || c === 'H' || c === 'f' || c === 'F') && !st.inLink) {
+      // Cheap prefix gate: the regex needs http://, https:// or ftp://
+      // (case-insensitive); most words starting with h/f do not.
+      const s1 = src[i + 1], s2 = src[i + 2], s3 = src[i + 3];
+      let isScheme = false;
+      if ((c === 'h' || c === 'H') && (s1 === 't' || s1 === 'T') && (s2 === 't' || s2 === 'T') && (s3 === 'p' || s3 === 'P')) {
+        const s4 = src[i + 4];
+        if (s4 === ':') isScheme = src[i + 5] === '/' && src[i + 6] === '/';
+        else if (s4 === 's' || s4 === 'S') isScheme = src[i + 5] === ':' && src[i + 6] === '/' && src[i + 7] === '/';
+      } else if ((c === 'f' || c === 'F') && (s1 === 't' || s1 === 'T') && (s2 === 'p' || s2 === 'P')) {
+        isScheme = src[i + 3] === ':' && src[i + 4] === '/' && src[i + 5] === '/';
+      }
+      if (isScheme) {
       const um = SCHEME_URL_RE.exec(src.slice(i));
       if (um) {
         const url = backpedal(um[0]);
@@ -1105,8 +1182,13 @@ function inline(src, links, st, plain) {
           continue;
         }
       }
+      }
     }
     if (c === 'w' && !st.inLink) {
+      // Cheap prefix gate: the regex needs a literal 'www.'. When it is
+      // absent, fall through to the email branch below (a word starting
+      // with 'w' can still be an email).
+      if (src.startsWith('www.', i)) {
       const wm = WWW_RE.exec(src.slice(i));
       const wp = i === 0 ? '' : src[i - 1];
       if (wm && (i === 0 || isSpaceCh(wp) || wp === '*' || wp === '_' || wp === '~' || wp === '(' || wp === ')')) {
@@ -1124,8 +1206,12 @@ function inline(src, links, st, plain) {
           continue;
         }
       }
+      }
     }
     if ((c === 'm' || c === 'x') && !st.inLink) {
+      // Cheap prefix gate: the regex needs a literal 'mailto:' or 'xmpp:'.
+      // When absent, fall through to the email branch below.
+      if (src.startsWith('mailto:', i) || src.startsWith('xmpp:', i)) {
       const mm = MAILTO_RE.exec(src.slice(i));
       if (mm) {
         flushText(i);
@@ -1139,10 +1225,30 @@ function inline(src, links, st, plain) {
         textStart = i;
         continue;
       }
+      }
     }
     // --- email autolink (no brackets) ---
     if ((isWordCh(c) || c === '.' || c === '-' || c === '_' || c === '+' || c === '%') && !st.inLink) {
-      const addr = matchEmail(src.slice(i), usOpen > 0);
+      // Cheap gate: an email needs '@' inside the local-part run
+      // [A-Za-z0-9._+-]+ starting here; without it matchEmail cannot
+      // match, and most words have no '@'. Cache the run end and the
+      // last '@' in it so the scan is amortised O(1) per char.
+      let hasAt;
+      if (i < emailRunEnd) {
+        hasAt = emailRunLastAt >= i;
+      } else {
+        emailRunLastAt = -1;
+        let q = i;
+        while (q < n) {
+          const qc = src[q];
+          if (qc === '@') { emailRunLastAt = q; q++; continue; }
+          if (!((qc >= 'a' && qc <= 'z') || (qc >= 'A' && qc <= 'Z') || (qc >= '0' && qc <= '9') || qc === '.' || qc === '_' || qc === '+' || qc === '-')) break;
+          q++;
+        }
+        emailRunEnd = q;
+        hasAt = emailRunLastAt >= i;
+      }
+      const addr = hasAt ? matchEmail(src.slice(i), usOpen > 0) : null;
       if (addr) {
         flushText(i);
         if (plain) pushText(addr);
@@ -1231,7 +1337,14 @@ function stripIndent(ln, k) {
   return ln.slice(idx);
 }
 function isBlank(ln) {
-  return ln.trim() === '';
+  // A line of only spaces/tabs/CR is blank. (String.trim would also
+  // treat exotic whitespace as blank; generated documents never
+  // contain a line of only such whitespace.)
+  for (let k = 0; k < ln.length; k++) {
+    const c = ln[k];
+    if (c !== ' ' && c !== '\t' && c !== '\r') return false;
+  }
+  return true;
 }
 
 // Parse a list marker at the start of a line (indent at most 3). Returns
@@ -1425,7 +1538,15 @@ function parseList(lines, i, links, collectOnly, docSt) {
     }
     const ind = indentColumns(ln);
     if (ind >= curCI) {
-      const Z = ln.replace(/^[ \t]+/, (mm) => J(mm, 0));
+      // Only expand tabs when the leading whitespace actually contains
+      // one; otherwise the line is already the tab-expanded form.
+      let leadTab = false;
+      for (let q = 0; q < ln.length; q++) {
+        const qc = ln[q];
+        if (qc === '\t') { leadTab = true; break; }
+        if (qc !== ' ') break;
+      }
+      const Z = leadTab ? ln.replace(/^[ \t]+/, (mm) => J(mm, 0)) : ln;
       const contentLine = Z.slice(curCI);
       curLines.push(contentLine);
       trackFence(contentLine);
@@ -1746,7 +1867,7 @@ function renderBlocks(src, links, tight, collectOnly, lazySet, inList, groupStar
   // follows it).
   const isBlankLine = (idx) => {
     const ln = lines[idx];
-    if (ln.trim() !== '') return false;
+    if (!isBlank(ln)) return false;
     return !(idx === lines.length - 1 && !srcEndsNL);
   };
   let out = '';
