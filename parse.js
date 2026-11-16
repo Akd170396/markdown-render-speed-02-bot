@@ -588,6 +588,34 @@ function renderWrapper(node, plain) {
   return out;
 }
 
+// The reference's emStrong masking (its #n): before scanning for
+// emphasis it replaces code-span inner backticks and escapes, then
+// replaces every link-like `[label](dest)` match (its blockSkip link
+// pattern, which requires equal backtick runs in code spans) with a
+// `[aaa...]` placeholder of the same length. Emphasis delimiters inside
+// such a placeholder are invisible to emStrong, so an em/strong whose
+// delimiters sit inside a `[label](dest)` that the link rule itself
+// rejects (because the label's code span has unequal backtick runs)
+// never forms. This is what leaves `_node ... _` literal in
+// `[at _node `` a ` b ``_](http://example.com)`.
+// Returns the [start, end) spans (in src coordinates; the masking
+// preserves length) of blockSkip link matches, or [] when src has no '['.
+const ANY_PUNCT_OUTSIDE_CODE_RE = /(`+)(?:[^`]|[^`][\s\S]*?[^`])\1(?!`)|`+|\\([\p{P}\p{S}])/gu;
+const BLOCKSKIP_LINK_RE = /\[(?:[^\[\]`]|(?<a>`+)[^`]+\k<a>(?!`))*?\]\((?:\\[\s\S]|[^\\\(\)]|\((?:\\[\s\S]|[^\\\(\)])*\))*\)/g;
+function blockSkipLinkSpans(src) {
+  if (!src.includes('[')) return [];
+  const masked = src.replace(ANY_PUNCT_OUTSIDE_CODE_RE,
+    (n, s, r) => r ? '+'.repeat(n.length) : s ? s + n.slice(s.length, -s.length).replace(/`/g, '+') + s : n);
+  const spans = [];
+  BLOCKSKIP_LINK_RE.lastIndex = 0;
+  let m;
+  while ((m = BLOCKSKIP_LINK_RE.exec(masked)) !== null) {
+    spans.push([m.index, m.index + m[0].length]);
+    if (m[0].length === 0) BLOCKSKIP_LINK_RE.lastIndex++;
+  }
+  return spans;
+}
+
 // Inline-parse a source string. `st` carries { hasLink, inRawBlock };
 // when `plain` is true the result is unescaped plain text (for image alt).
 function inline(src, links, st, plain) {
@@ -616,6 +644,15 @@ function inline(src, links, st, plain) {
   let textStart = 0;
   const flushText = (to) => {
     if (to > textStart) pushText(src.slice(textStart, to));
+  };
+  // Spans of [label](dest) patterns the reference masks before emphasis
+  // scanning; a delimiter run starting inside one is literal text.
+  const maskedSpans = blockSkipLinkSpans(src);
+  const isMasked = (idx) => {
+    for (let s = 0; s < maskedSpans.length; s++) {
+      if (idx >= maskedSpans[s][0] && idx < maskedSpans[s][1]) return true;
+    }
+    return false;
   };
   while (i < n) {
     const c = src[i];
@@ -727,6 +764,8 @@ function inline(src, links, st, plain) {
     if (c === '*' || c === '_') {
       let j = i;
       while (j < n && src[j] === c) j++;
+      // Inside a blockSkip-masked [label](dest) the run is literal text.
+      if (isMasked(i)) { i = j; continue; }
       let len = j - i;
       const fl = flanking(src, i, len);
       let canOpen = fl.left;
@@ -753,6 +792,8 @@ function inline(src, links, st, plain) {
       while (j < n && src[j] === '~') j++;
       const len = j - i;
       if (len > 2) { i = j; continue; }
+      // Inside a blockSkip-masked [label](dest) the run is literal text.
+      if (isMasked(i)) { i = j; continue; }
       const fl = flanking(src, i, len);
       flushText(i);
       push({ k: 'd', c, n: len, open: fl.left, close: fl.right });
