@@ -1388,9 +1388,11 @@ function parseHtmlBlock(lines, i, topLevel) {
   for (let k = i; k < j; k++) {
     html += lines[k].s;
     if (k + 1 < j) html += '\n';
-    // A truly empty line after the block swallows the trailing '\n';
-    // a whitespace-only line (spaces/tabs) does not.
-    else if (lines[k].nl && j < lines.length && lines[j].s !== '') html += '\n';
+    // Trailing '\n': for types 1-5 (ended by a terminator like '-->')
+    // a truly empty line after the block swallows it, but a
+    // whitespace-only line does not. For types 6-7 (ended by a blank
+    // line) any blank line swallows it.
+    else if (lines[k].nl && j < lines.length && (h.type <= 5 ? lines[j].s !== '' : !isBlankLine(lines[j]))) html += '\n';
     else if (topLevel && lines[k].nl && j >= lines.length) html += '\n';
   }
   return { html, end: j };
