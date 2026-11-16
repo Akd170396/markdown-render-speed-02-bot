@@ -668,10 +668,18 @@ function resolveDelimiters(tokens) {
       const ci = tokens.indexOf(closer);
       if (ci < 0) break;
       let opener = null, oi = -1;
+      // An opener inside an already-formed emphasis cannot pair with a
+      // closer outside it (and vice versa): track the emphasis depth
+      // while scanning backwards; only an opener at the closer's own
+      // depth may pair.
+      let depth = 0;
       for (let k = ci - 1; k >= 0; k--) {
         const cand = tokens[k];
+        if (/^(em|strong|del)-close$/.test(cand.t)) { depth++; continue; }
+        if (/^(em|strong|del)-open$/.test(cand.t)) { depth--; continue; }
         if (cand.t !== 'delim' || cand.ch !== closer.ch || !cand.canOpen || cand.n === 0) continue;
-        if ((cand.ch === '*' || cand.ch === '_') && cand.canClose && closer.canOpen) {
+        if (depth !== 0) continue;
+        if ((cand.ch === '*' || cand.ch === '_') && ((cand.canOpen && cand.canClose) || (closer.canOpen && closer.canClose))) {
           if ((cand.n + closer.n) % 3 === 0 && (cand.n % 3 !== 0 || closer.n % 3 !== 0)) continue;
         }
         opener = cand; oi = k;
@@ -1403,7 +1411,15 @@ function parseBlocks(lines, defs, tight, firstCheckbox, collect, topLevel) {
       continue;
     }
     const d = tryParseDef(lines, i, defs);
-    if (d) { i += d.consumed; continue; }
+    if (d) {
+      // A definition is a block-level element: a blank line before or
+      // after it loosens its container, even though it renders nothing.
+      if (seenBlankAfterBlock) loose = true;
+      seenBlankAfterBlock = false;
+      seenBlock = true;
+      i += d.consumed;
+      continue;
+    }
     let res = null;
     const ind = lineIndent(L);
     if (ind.cols >= 4) {
