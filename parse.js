@@ -665,17 +665,26 @@ function scanInline(src, defs) {
     if (ch === '`') {
       let n = 0;
       while (i + n < len && src[i + n] === '`') n++;
-      // Find the next run of exactly n backticks. A multi-backtick
-      // code span must not span past a ']' that closes a valid inline
-      // link (the link forms, the backticks stay literal). A single
-      // backtick span MAY span past a ']' (cm-342, cm-525), so the
-      // check applies only when n >= 2.
+      // Find the next run of exactly n backticks. A code span must not
+      // span past a ']' that closes a valid inline link (the link
+      // forms, the backticks stay literal) -- unless the ']'s
+      // destination holds a backtick, in which case the ']' cannot
+      // form a link and a code span may span past it (cm-342, cm-525).
+      // A single-backtick span is also blocked when its bracket holds
+      // an unclosed multi-backtick run: the multi-tick opener was
+      // already refused past this ']' (doc-28), so a later single
+      // backtick may not smuggle the link away either.
+      const topB = brackets[brackets.length - 1];
+      const blocked = n >= 2 || (topB && topB.multiTick);
       let j = i + n;
       let close = -1;
       while (j < len) {
-        if (n >= 2 && src[j] === ']' && brackets.length > 0 && src[j + 1] === '(') {
+        if (blocked && src[j] === ']' && brackets.length > 0 && src[j + 1] === '(') {
           const d = parseInlineDest(src, j + 2);
-          if (d) break;
+          if (d && !src.slice(j + 2, d.end).includes('`')) {
+            if (n >= 2 && topB) topB.multiTick = true;
+            break;
+          }
         }
         if (src[j] === '`') {
           let m = 0;
