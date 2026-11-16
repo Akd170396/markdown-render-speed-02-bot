@@ -665,10 +665,18 @@ function scanInline(src, defs) {
     if (ch === '`') {
       let n = 0;
       while (i + n < len && src[i + n] === '`') n++;
-      // Find the next run of exactly n backticks.
+      // Find the next run of exactly n backticks. A multi-backtick
+      // code span must not span past a ']' that closes a valid inline
+      // link (the link forms, the backticks stay literal). A single
+      // backtick span MAY span past a ']' (cm-342, cm-525), so the
+      // check applies only when n >= 2.
       let j = i + n;
       let close = -1;
       while (j < len) {
+        if (n >= 2 && src[j] === ']' && brackets.length > 0 && src[j + 1] === '(') {
+          const d = parseInlineDest(src, j + 2);
+          if (d) break;
+        }
         if (src[j] === '`') {
           let m = 0;
           while (j + m < len && src[j + m] === '`') m++;
