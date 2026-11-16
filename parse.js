@@ -720,6 +720,7 @@ function renderTokens(tokens) {
   for (const tok of tokens) {
     switch (tok.t) {
       case 'text': out += renderText(tok.s); break;
+      case 'open': out += renderText(tok.s); break;
       case 'code': out += '<code>' + escapeAll(tok.s) + '</code>'; break;
       case 'html': out += tok.s; break;
       case 'br': out += '<br>'; break;
@@ -946,11 +947,12 @@ function matchListMarker(L) {
     else { const w = 4 - (col % 4); col += w; wsCols += w; k++; }
   }
   if (wsCols === 0 && k < after.length) return null;
-  const extra = (wsCols === 0 || wsCols >= 5) ? 1 : wsCols;
+  const contentEmpty = k >= after.length;
+  const extra = (wsCols === 0 || wsCols >= 5 || contentEmpty) ? 1 : wsCols;
   const contentIndent = ind.cols + markerWidth + extra;
   const content = stripColsStr(after, base + markerWidth, extra);
   content.nl = L.nl;
-  return { type, markerWidth, start, delim, contentIndent, content, indent: ind.cols };
+  return { type, markerWidth, start, delim, contentIndent, content, indent: ind.cols, bullet: type === 'bullet' ? rest[0] : '' };
 }
 function splitTableRow(s) {
   let t = s.replace(/^[ \t]+/, '').replace(/[ \t]+$/, '');
@@ -1050,7 +1052,19 @@ function makeTracker() {
   return { inFence: false, fenceCh: '', fenceLen: 0, inPara: false, lastBlank: true, inCode: false };
 }
 function trackerUpdate(tr, L) {
-  if (isBlankLine(L)) { tr.lastBlank = true; tr.inCode = false; return; }
+  // Strip nested blockquote/list markers: a lazy line after a nested
+  // container continues the innermost paragraph, so track the innermost
+  // content.
+  let cur = L;
+  while (true) {
+    const bq = matchBlockquote(cur);
+    if (bq) { cur = bq; continue; }
+    const m = matchListMarker(cur);
+    if (m) { cur = m.content; continue; }
+    break;
+  }
+  L = cur;
+  if (isBlankLine(L)) { tr.lastBlank = true; tr.inCode = false; tr.inPara = false; return; }
   if (tr.inFence) {
     if (isClosingFence(L, tr.fenceCh, tr.fenceLen)) tr.inFence = false;
     tr.inPara = false; tr.lastBlank = false; tr.inCode = false; return;
@@ -1073,6 +1087,7 @@ function parseFenced(lines, i) {
     j++;
   }
   const end = j < lines.length ? j + 1 : j;
+  if (content.length > 0 && content[content.length - 1] === '') content.pop();
   let html = '<pre><code';
   if (f.info) html += ' class="language-' + escapeTextOnly(unescapeBackslashes(f.info.split(/[ \t]/)[0])) + '"';
   html += '>' + escapeAll(content.length ? content.join('\n') + '\n' : '') + '</code></pre>\n';
@@ -1285,6 +1300,7 @@ function collectListItem(lines, start, marker) {
     if (isBlankLine(L)) { trailingBlanks++; j++; continue; }
     const ind = lineIndent(L);
     if (ind.cols >= marker.contentIndent) {
+      if (!sawContent && trailingBlanks > 0) break;
       if (trailingBlanks > 0) {
         if (sawContent && !tr.inFence) loose = true;
         for (let b = 0; b < trailingBlanks; b++) itemLines.push({ s: '', b: 0, nl: lines[j - trailingBlanks + b].nl });
@@ -1314,8 +1330,10 @@ function collectListItem(lines, start, marker) {
         continue;
       }
       if (!isBlockStartLine(L)) {
-        itemLines.push({ ...L, lazy: 'li' });
-        trackerUpdate(tr, L);
+        const ind2 = lineIndent(L);
+        const base = ind2.cols >= 4 ? stripCols(L, 4) : L;
+        itemLines.push({ ...base, lazy: 'li' });
+        trackerUpdate(tr, base);
         sawContent = true;
         end = j + 1;
         j++;
@@ -1337,8 +1355,8 @@ function parseList(lines, i, defs, collect) {
     const m = matchListMarker(lines[j]);
     if (!m || m.type !== first.type) break;
     if (first.type === 'ordered' && m.delim !== first.delim) break;
+    if (first.type === 'bullet' && m.bullet !== first.bullet) break;
     const item = collectListItem(lines, j, m);
-    if (item.loose) loose = true;
     items.push(item);
     j = item.end;
     let b = 0;
@@ -1346,13 +1364,19 @@ function parseList(lines, i, defs, collect) {
     if (b > 0) {
       const nx = lines[j + b];
       const nm = nx ? matchListMarker(nx) : null;
-      if (nm && nm.type === first.type && (first.type !== 'ordered' || nm.delim === first.delim)) {
+      if (nm && nm.type === first.type && (first.type !== 'ordered' || nm.delim === first.delim) && (first.type !== 'bullet' || nm.bullet === first.bullet)) {
         loose = true;
         j += b;
         continue;
       }
       break;
     }
+  }
+  // An item loosens its list only when its own top-level blocks are
+  // separated by a blank line; a blank inside a nested block does not.
+  for (const item of items) {
+    const probe = parseBlocks(item.lines, defs, true, true, true, false);
+    if (probe.loose) { loose = true; break; }
   }
   let out = first.type === 'bullet' ? '<ul>\n' : (first.start !== 1 ? '<ol start="' + first.start + '">\n' : '<ol>\n');
   const tight = !loose;
@@ -1368,6 +1392,7 @@ function parseBlocks(lines, defs, tight, firstCheckbox, collect, topLevel) {
   let out = '';
   let seenBlock = false;
   let seenBlankAfterBlock = false;
+  let loose = false;
   let i = 0;
   let first = true;
   while (i < lines.length) {
@@ -1409,13 +1434,13 @@ function parseBlocks(lines, defs, tight, firstCheckbox, collect, topLevel) {
     } else {
       i = res.end;
     }
-    if (seenBlankAfterBlock) { /* blank between blocks at this level */ }
+    if (seenBlankAfterBlock) { loose = true; }
     seenBlankAfterBlock = false;
     seenBlock = true;
     first = false;
     out += res.html;
   }
-  return { html: out };
+  return { html: out, loose };
 }
 
 export function parse(src) {
