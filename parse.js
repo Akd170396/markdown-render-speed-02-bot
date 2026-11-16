@@ -1632,14 +1632,18 @@ function collectListItem(lines, start, marker) {
   let loose = false;
   let trailingBlanks = 0;
   let end = start + 1;
+  let fenceContent = 0;
   let j = start + 1;
   while (j < lines.length) {
     const L = lines[j];
     if (isBlankLine(L)) { trailingBlanks++; j++; continue; }
     // Inside a fenced code block, content lines belong to the item
-    // regardless of indentation (a fence's content need not be indented
-    // to the list content level); the fence closes on its own line.
+    // -- EXCEPT the FIRST content line: if it is shallower than the
+    // list content indent, the fence renders empty and the line ends
+    // the item (doc-17/23/38). Once the fence has content, later
+    // column-0 lines are included (doc-02).
     if (tr.inFence) {
+      if (fenceContent === 0 && lineIndent(L).cols < marker.contentIndent) break;
       if (trailingBlanks > 0) {
         for (let b = 0; b < trailingBlanks; b++) itemLines.push({ s: '', b: 0, nl: lines[j - trailingBlanks + b].nl });
         trailingBlanks = 0;
@@ -1651,6 +1655,7 @@ function collectListItem(lines, start, marker) {
       }
       itemLines.push(stripped);
       trackerUpdate(tr, stripped);
+      fenceContent++;
       sawContent = true;
       end = j + 1;
       j++;
@@ -1673,7 +1678,9 @@ function collectListItem(lines, start, marker) {
         stripped = { s: ' '.repeat(w) + stripped.s.slice(1), b: stripped.b + w, nl: stripped.nl };
       }
       itemLines.push(stripped);
+      const wasFence = tr.inFence;
       trackerUpdate(tr, stripped);
+      if (!wasFence && tr.inFence) fenceContent = 0;
       sawContent = true;
       end = j + 1;
       j++;
