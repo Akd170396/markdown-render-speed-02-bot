@@ -1145,15 +1145,22 @@ function matchBlockquote(L) {
   if (ind.cols > 3 || rest[0] !== '>') return null;
   const after = { s: rest.slice(1), b: L.b + ind.cols + 1, nl: L.nl };
   const stripped = stripCols(after, 1);
-  // A tab right after the '> ' marker is expanded to spaces (to the
-  // next tab stop), not preserved as a tab. The column is measured
-  // within this blockquote level's string (indent + '> ' = ind.cols+2
-  // chars before the tab), so a nested blockquote expands from its
-  // own level, not from the document column.
-  if (stripped.s[0] === '\t') {
-    const col = ind.cols + 2;
-    const w = 4 - (col % 4);
-    return { s: ' '.repeat(w) + stripped.s.slice(1), b: stripped.b + w, nl: stripped.nl };
+  // A tab in the leading whitespace after the '> ' marker is expanded
+  // to spaces (to the next tab stop), not preserved as a tab. The
+  // column is measured within this blockquote level's string
+  // (indent + '> ' = ind.cols+2 chars before the stripped content),
+  // so a nested blockquote expands from its own level, not from the
+  // document column.
+  let s = stripped.s;
+  let k = 0;
+  let col = ind.cols + 2;
+  let out = '';
+  while (k < s.length && (s[k] === ' ' || s[k] === '\t')) {
+    if (s[k] === ' ') { out += ' '; col++; k++; }
+    else { const w = 4 - (col % 4); out += ' '.repeat(w); col += w; k++; }
+  }
+  if (k > 0 && out !== s.slice(0, k)) {
+    return { s: out + s.slice(k), b: stripped.b + (out.length - k), nl: stripped.nl };
   }
   return stripped;
 }
@@ -1425,9 +1432,13 @@ function parseTable(lines, i, defs, collect) {
   let j = i + 2;
   while (j < lines.length && (!isBlankLine(lines[j]) || lines[j].s.includes('\t'))) {
     // A line that starts a block (blockquote, list, heading, fence, hr,
-    // html block, setext) ends the table; it is not a row. A
-    // whitespace-only line holding a tab is an empty row, not a blank
-    // line (a spaces-only line does end the table).
+    // html block) ends the table; it is not a row. A setext-underline
+    // line of '=' is a table ROW (a single cell), not a heading
+    // underline: inside a table there is no paragraph for it to
+    // underline. A '-' line still ends the table (it may be an hr).
+    // A whitespace-only line holding a tab is an empty row, not a
+    // blank line (a spaces-only line does end the table).
+    if (matchSetext(lines[j]) === 1) { rows.push(splitTableRow(lines[j].s.slice(lineIndent(lines[j]).pos))); j++; continue; }
     if (isBlockStartLine(lines[j]) || matchFence(lines[j])) break;
     rows.push(splitTableRow(lines[j].s.slice(lineIndent(lines[j]).pos)));
     j++;
