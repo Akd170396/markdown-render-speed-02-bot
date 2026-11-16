@@ -826,6 +826,16 @@ function resolveDelimiters(tokens) {
         if ((cand.ch === '*' || cand.ch === '_') && ((cand.canOpen && cand.canClose) || (closer.canOpen && closer.canClose))) {
           if ((cand.n + closer.n) % 3 === 0 && (cand.n % 3 !== 0 || closer.n % 3 !== 0)) continue;
         }
+        // A lone '*' closer cannot steal a delimiter from a '**' opener
+        // across an em-close that could also open (the em's closer is
+        // followed by a letter/digit, so it opens a new scope).
+        if (closer.ch === '*' && closer.n === 1 && cand.n >= 2) {
+          let blocked = false;
+          for (let m = k + 1; m < ci; m++) {
+            if (tokens[m].t === 'em-close' && tokens[m].canOpen) { blocked = true; break; }
+          }
+          if (blocked) continue;
+        }
         opener = cand; oi = k;
         break;
       }
@@ -856,6 +866,10 @@ function resolveDelimiters(tokens) {
         }
         if (/[A-Za-z0-9]/.test(nextCh)) closeTok.blocksOuter = true;
       }
+      // An em closer that could also open (followed by a letter/digit)
+      // blocks a lone '*' closer from stealing a delimiter from a '**'
+      // opener beyond it.
+      if (kind === 'em' && closer.canOpen) closeTok.canOpen = true;
       tokens.splice(ci, 0, closeTok);
       tokens.splice(oi + 1, 0, { t: kind + '-open' });
       opener.n -= use;
