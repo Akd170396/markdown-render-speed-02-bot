@@ -500,8 +500,11 @@ function matchExtendedAutolink(src, i, inBrackets, tokens, bracketCanForm) {
   if (rest.startsWith('www.')) {
     const m = /^[A-Za-z0-9-]+(?:\.[A-Za-z0-9.-]*[A-Za-z0-9])?(?:[/?#][^\s<>]*)?/.exec(rest.slice(4));
     if (m) {
-      let text = 'www.' + trimAutolinkEnd(m[0]);
-      text = truncateAtBracketClose(src, i, text, inBrackets, bracketCanForm);
+      // Truncate at a ']' first (it needs the full match, including a
+      // trailing ')' that closes the '(' after ']'), then trim the
+      // trailing punctuation of the surviving URL.
+      let text = truncateAtBracketClose(src, i, 'www.' + m[0], inBrackets, bracketCanForm);
+      text = trimAutolinkEnd(text);
       if (!text || text === 'www.') return null;
       return { t: 'link', href: encodeURI('http://' + text), title: null, plain: text, html: renderText(text), end: i + text.length, auto: 'ext' };
     }
@@ -510,8 +513,8 @@ function matchExtendedAutolink(src, i, inBrackets, tokens, bracketCanForm) {
   // scheme://
   const sm = /^([A-Za-z][A-Za-z0-9+.-]{1,31}):\/\/[^\s<>]+/.exec(rest);
   if (sm) {
-    let text = trimAutolinkEnd(sm[0]);
-    text = truncateAtBracketClose(src, i, text, inBrackets, bracketCanForm);
+    let text = truncateAtBracketClose(src, i, sm[0], inBrackets, bracketCanForm);
+    text = trimAutolinkEnd(text);
     if (!text) return null;
     return { t: 'link', href: encodeURI(text), title: null, plain: text, html: renderText(text), end: i + text.length, auto: 'ext' };
   }
