@@ -507,10 +507,20 @@ function matchExtendedAutolink(src, i, inBrackets, tokens, bracketCanForm) {
   if (rest.startsWith('www.')) {
     const m = /^[A-Za-z0-9-]+(?:\.[A-Za-z0-9.-]*[A-Za-z0-9])?(?:[/?#][^\s<>]*)?/.exec(rest.slice(4));
     if (m) {
+      // A trailing backslash is part of the autolink (kept in text,
+      // %5C in the href); the newline after it is a soft break, not a
+      // hard break. Only when the backslash ends the URL (followed by
+      // whitespace, a newline, or the end of the string).
+      let matched = m[0];
+      const afterM = rest.slice(4)[matched.length];
+      const afterBack = rest.slice(4)[matched.length + 1];
+      if (afterM === '\\' && (afterBack === undefined || afterBack === ' ' || afterBack === '\t' || afterBack === '\n')) {
+        matched += '\\';
+      }
       // Truncate at a ']' first (it needs the full match, including a
       // trailing ')' that closes the '(' after ']'), then trim the
       // trailing punctuation of the surviving URL.
-      let text = truncateAtBracketClose(src, i, 'www.' + m[0], inBrackets, bracketCanForm);
+      let text = truncateAtBracketClose(src, i, 'www.' + matched, inBrackets, bracketCanForm);
       text = trimAutolinkEnd(text);
       if (!text || text === 'www.') return null;
       return { t: 'link', href: encodeURI('http://' + text), title: null, plain: text, html: renderText(text), end: i + text.length, auto: 'ext' };
