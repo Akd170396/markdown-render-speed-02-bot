@@ -395,10 +395,11 @@ function trimAutolinkEnd(s) {
   while (end > 0) {
     const ch = s[end - 1];
     if (ch === '?' || ch === '!' || ch === '.' || ch === ',' || ch === ':' || ch === ';' || ch === '*' || ch === '_' || ch === '~') {
-      // A trailing ';' that ends an entity-like &...; stays if it is one.
+      // A trailing &...; sequence is not part of the autolink at all:
+      // drop it entirely (the & and the name, not just the ';').
       if (ch === ';') {
         const amp = s.lastIndexOf('&', end - 1);
-        if (amp >= 0 && /^[A-Za-z0-9]+$/.test(s.slice(amp + 1, end - 1))) break;
+        if (amp >= 0 && /^[A-Za-z0-9]+$/.test(s.slice(amp + 1, end - 1))) { end = amp; continue; }
       }
       end--;
       continue;
@@ -433,10 +434,35 @@ function matchExtendedAutolink(src, i) {
     let text = trimAutolinkEnd(sm[0]);
     return { t: 'link', href: encodeURI(text), title: null, plain: text, html: renderText(text), end: i + text.length };
   }
+  // scheme:email (mailto:, xmpp:, ...) with an optional single path
+  // segment. The scheme is 2-32 chars; the address must be an email.
+  const scm = /^([A-Za-z][A-Za-z0-9+.-]{1,31}):/.exec(rest);
+  if (scm) {
+    const after = rest.slice(scm[0].length);
+    const em2 = /^[A-Za-z0-9.!#$%&'*+\/=?^_`{|}~-]+@[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?)+/.exec(after);
+    if (em2) {
+      // A domain ending in '-' or '_' is not a valid email.
+      const nx = after[em2[0].length];
+      if (nx === '-' || nx === '_') return null;
+      let text = scm[0] + em2[0];
+      const p = after.slice(em2[0].length);
+      const pm = /^\/[^\s<>\/]+/.exec(p);
+      if (pm) text += pm[0];
+      text = trimAutolinkEnd(text);
+      return { t: 'link', href: text, title: null, plain: text, html: renderText(text), end: i + text.length };
+    }
+    // A scheme followed by a non-email is not an autolink; fall through
+    // so the email part alone is not linked either (the scheme stays).
+    return null;
+  }
   // email (only at the start of a word)
   if (i === 0 || !/[A-Za-z0-9.!#$%&'*+\/=?^_`{|}~-]/.test(src[i - 1])) {
     const em = /^[A-Za-z0-9.!#$%&'*+\/=?^_`{|}~-]+@[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?)+/.exec(rest);
     if (em) {
+      // A domain ending in '-' or '_' is not a valid email: the whole
+      // thing is literal, not a trimmed autolink.
+      const nx = rest[em[0].length];
+      if (nx === '-' || nx === '_') return null;
       const text = em[0];
       return { t: 'link', href: 'mailto:' + text, title: null, plain: text, html: renderText(text), end: i + text.length };
     }
@@ -470,7 +496,7 @@ function scanInline(src, defs) {
       const ch = src[i];
       if (ch === '\\' || ch === '`' || ch === '*' || ch === '_' || ch === '[' || ch === ']' || ch === '<' || ch === '\n') break;
       if (ch === '!' && src[i + 1] === '[') break;
-      if (ch === '~' && src[i + 1] === '~') break;
+      if (ch === '~') break;
       if (ch === 'w' && src.startsWith('www.', i)) break;
       if (isLetter(ch) && (i === 0 || !(isAlphaNum(src[i - 1]) || src[i - 1] === '+' || src[i - 1] === '.' || src[i - 1] === '-'))) {
         const colon = src.indexOf('://', i);
@@ -487,7 +513,11 @@ function scanInline(src, defs) {
         const at = src.indexOf('@', i);
         if (at > i && at - i <= 64) {
           const em = /^[A-Za-z0-9.!#$%&'*+\/=?^_`{|}~-]+@[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?)+/.exec(src.slice(i));
-          if (em) break;
+          // A domain ending in '-' or '_' is not a valid email autolink.
+          if (em) {
+            const nx = src[i + em[0].length];
+            if (nx !== '-' && nx !== '_') break;
+          }
         }
       }
       i++;
@@ -620,7 +650,7 @@ function scanInline(src, defs) {
       i += n;
       continue;
     }
-    if (ch === '~' && src[i + 1] === '~') {
+    if (ch === '~') {
       let n = 0;
       while (i + n < len && src[i + n] === '~') n++;
       pushDelim('~', n);
@@ -650,7 +680,12 @@ function scanInline(src, defs) {
       const auto = matchExtendedAutolink(src, i);
       if (auto) { tokens.push(auto); i = auto.end; continue; }
     }
+    const before = i;
     consumeTextRun();
+    // Safety net: if the text run consumed nothing (a lookahead said
+    // "special" but the matcher declined), consume one char as text so
+    // the scanner always makes progress.
+    if (i === before && i < len) { pushText(src[i]); i++; }
   }
   return tokens;
 }
@@ -689,6 +724,8 @@ function resolveDelimiters(tokens) {
   const delims = [];
   for (const tok of tokens) if (tok.t === 'delim') delims.push(tok);
   for (const closer of delims) {
+    // Strikethrough runs of 3+ tildes never form a del.
+    if (closer.ch === '~' && closer.n > 2) continue;
     while (closer.n > 0 && closer.canClose) {
       const ci = tokens.indexOf(closer);
       if (ci < 0) break;
@@ -704,6 +741,8 @@ function resolveDelimiters(tokens) {
         if (/^(em|strong|del)-open$/.test(cand.t)) { depth--; continue; }
         if (cand.t !== 'delim' || cand.ch !== closer.ch || !cand.canOpen || cand.n === 0) continue;
         if (depth !== 0) continue;
+        // Strikethrough: the two runs must match exactly (1 or 2).
+        if (closer.ch === '~' && cand.n !== closer.n) continue;
         if ((cand.ch === '*' || cand.ch === '_') && ((cand.canOpen && cand.canClose) || (closer.canOpen && closer.canClose))) {
           if ((cand.n + closer.n) % 3 === 0 && (cand.n % 3 !== 0 || closer.n % 3 !== 0)) continue;
         }
@@ -722,8 +761,8 @@ function resolveDelimiters(tokens) {
         opener.canOpen = false;
         continue;
       }
-      const use = (opener.n >= 2 && closer.n >= 2) ? 2 : 1;
-      const kind = use === 2 ? (opener.ch === '~' ? 'del' : 'strong') : 'em';
+      const use = opener.ch === '~' ? opener.n : ((opener.n >= 2 && closer.n >= 2) ? 2 : 1);
+      const kind = opener.ch === '~' ? 'del' : (use === 2 ? 'strong' : 'em');
       tokens.splice(ci, 0, { t: kind + '-close' });
       tokens.splice(oi + 1, 0, { t: kind + '-open' });
       opener.n -= use;
@@ -990,12 +1029,20 @@ function matchListMarker(L) {
 function splitTableRow(s) {
   let t = s.replace(/^[ \t]+/, '').replace(/[ \t]+$/, '');
   if (t.startsWith('|')) t = t.slice(1);
-  if (t.endsWith('|') && !t.endsWith('\\|')) t = t.slice(0, -1);
+  // A trailing '|' is the row's closing pipe unless escaped by an odd
+  // number of backslashes (\\| is a literal backslash + a real pipe).
+  if (t.endsWith('|')) {
+    let bs = 0;
+    for (let k = t.length - 2; k >= 0 && t[k] === '\\'; k--) bs++;
+    if (bs % 2 === 0) t = t.slice(0, -1);
+  }
   const cells = [];
   let cur = '';
   for (let i = 0; i < t.length; i++) {
     const ch = t[i];
-    if (ch === '\\' && i + 1 < t.length && t[i + 1] === '|') { cur += '\\|'; i++; continue; }
+    // \| is an escaped pipe (not a separator; the backslash is dropped),
+    // \\ is an escaped backslash (a following | IS a separator).
+    if (ch === '\\' && i + 1 < t.length && (t[i + 1] === '|' || t[i + 1] === '\\')) { cur += t[i + 1]; i++; continue; }
     if (ch === '|') { cells.push(cur); cur = ''; continue; }
     cur += ch;
   }
@@ -1176,6 +1223,9 @@ function parseTable(lines, i, defs, collect) {
   const rows = [];
   let j = i + 2;
   while (j < lines.length && !isBlankLine(lines[j])) {
+    // A line that starts a block (blockquote, list, heading, fence, hr,
+    // html block, setext) ends the table; it is not a row.
+    if (isBlockStartLine(lines[j]) || matchFence(lines[j])) break;
     rows.push(splitTableRow(lines[j].s.slice(lineIndent(lines[j]).pos)));
     j++;
   }
@@ -1183,16 +1233,20 @@ function parseTable(lines, i, defs, collect) {
   for (let c = 0; c < headerCells.length; c++) {
     out += '<th' + (aligns[c] ? ' align="' + aligns[c] + '"' : '') + '>' + (collect ? '' : parseInline(headerCells[c], defs)) + '</th>\n';
   }
-  out += '</tr>\n</thead>\n<tbody>';
-  for (const row of rows) {
-    out += '<tr>\n';
-    for (let c = 0; c < headerCells.length; c++) {
-      const cell = c < row.length ? row[c] : '';
-      out += '<td' + (aligns[c] ? ' align="' + aligns[c] + '"' : '') + '>' + (collect ? '' : parseInline(cell, defs)) + '</td>\n';
+  out += '</tr>\n</thead>\n';
+  if (rows.length > 0) {
+    out += '<tbody>';
+    for (const row of rows) {
+      out += '<tr>\n';
+      for (let c = 0; c < headerCells.length; c++) {
+        const cell = c < row.length ? row[c] : '';
+        out += '<td' + (aligns[c] ? ' align="' + aligns[c] + '"' : '') + '>' + (collect ? '' : parseInline(cell, defs)) + '</td>\n';
+      }
+      out += '</tr>\n';
     }
-    out += '</tr>\n';
+    out += '</tbody>';
   }
-  out += '</tbody></table>\n';
+  out += '</table>\n';
   return { html: out, end: j };
 }
 
