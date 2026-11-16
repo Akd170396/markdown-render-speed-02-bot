@@ -498,7 +498,13 @@ let inAnchor = false;
 function anchorTagState(html) {
   const m = /^<\/?([A-Za-z][A-Za-z0-9-]*)/.exec(html);
   if (!m || m[1].toLowerCase() !== 'a') return null;
-  return html[1] === '/' ? 'close' : 'open';
+  if (html[1] === '/') return 'close';
+  // Self-closing only when '/>' follows a non-whitespace character:
+  // '<a/>' does not open an anchor, but '<a />' (space before '/')
+  // does open one (marked treats the '/' as part of the tag text).
+  const slash = html.length - 2;
+  if (html.endsWith('/>') && slash > 0 && html[slash - 1] !== ' ' && html[slash - 1] !== '\t') return null;
+  return 'open';
 }
 function scanInline(src, defs) {
   const len = src.length;
