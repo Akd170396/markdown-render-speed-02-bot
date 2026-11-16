@@ -590,28 +590,31 @@ function renderWrapper(node, plain) {
 
 // The reference's emStrong masking (its #n): before scanning for
 // emphasis it replaces code-span inner backticks and escapes, then
-// replaces every link-like `[label](dest)` match (its blockSkip link
-// pattern, which requires equal backtick runs in code spans) with a
-// `[aaa...]` placeholder of the same length. Emphasis delimiters inside
-// such a placeholder are invisible to emStrong, so an em/strong whose
-// delimiters sit inside a `[label](dest)` that the link rule itself
-// rejects (because the label's code span has unequal backtick runs)
-// never forms. This is what leaves `_node ... _` literal in
-// `[at _node `` a ` b ``_](http://example.com)`.
+// replaces every blockSkip match -- a `[label](dest)` link, a code span,
+// or an HTML tag -- with a `[aaa...]` placeholder of the same length.
+// Emphasis delimiters inside such a placeholder are invisible to
+// emStrong, so an em/strong whose delimiters sit inside one never
+// forms. The code-span alternative is the important one: a stray
+// backtick left by an unequal-backtick code span in a link label (e.g.
+// `` ``guide` ``) pairs with a later backtick and the whole span
+// between them is masked, hiding the `*`/`_` runs inside it. This is
+// what leaves `*small release **same***` literal in
+// `[values ``guide` in](#should) ... [previous `a_b`](./docs/we.md)`.
 // Returns the [start, end) spans (in src coordinates; the masking
-// preserves length) of blockSkip link matches, or [] when src has no '['.
+// preserves length) of blockSkip matches, or [] when src has no '[', '`'
+// or '<'.
 const ANY_PUNCT_OUTSIDE_CODE_RE = /(`+)(?:[^`]|[^`][\s\S]*?[^`])\1(?!`)|`+|\\([\p{P}\p{S}])/gu;
-const BLOCKSKIP_LINK_RE = /\[(?:[^\[\]`]|(?<a>`+)[^`]+\k<a>(?!`))*?\]\((?:\\[\s\S]|[^\\\(\)]|\((?:\\[\s\S]|[^\\\(\)])*\))*\)/g;
+const BLOCKSKIP_RE = /\[(?:[^\[\]`]|(?<a>`+)[^`]+\k<a>(?!`))*?\]\((?:\\[\s\S]|[^\\\(\)]|\((?:\\[\s\S]|[^\\\(\)])*\))*\)|(?<!`)()(?<b>`+)[^`]+\k<b>(?!`)|<(?! )[^<>]*?>/g;
 function blockSkipLinkSpans(src) {
-  if (!src.includes('[')) return [];
+  if (!src.includes('[') && !src.includes('`') && !src.includes('<')) return [];
   const masked = src.replace(ANY_PUNCT_OUTSIDE_CODE_RE,
     (n, s, r) => r ? '+'.repeat(n.length) : s ? s + n.slice(s.length, -s.length).replace(/`/g, '+') + s : n);
   const spans = [];
-  BLOCKSKIP_LINK_RE.lastIndex = 0;
+  BLOCKSKIP_RE.lastIndex = 0;
   let m;
-  while ((m = BLOCKSKIP_LINK_RE.exec(masked)) !== null) {
+  while ((m = BLOCKSKIP_RE.exec(masked)) !== null) {
     spans.push([m.index, m.index + m[0].length]);
-    if (m[0].length === 0) BLOCKSKIP_LINK_RE.lastIndex++;
+    if (m[0].length === 0) BLOCKSKIP_RE.lastIndex++;
   }
   return spans;
 }
