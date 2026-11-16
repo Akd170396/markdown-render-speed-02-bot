@@ -814,8 +814,10 @@ function resolveDelimiters(tokens) {
           depth++;
           // A strong closer that is followed by a letter/digit and whose
           // matching opener was preceded by whitespace opens a new scope
-          // as well, so an opener beyond it cannot pair outside it.
-          if (cand.t === 'strong-close' && cand.blocksOuter) depth++;
+          // as well, so a lone '*' opener beyond it cannot pair with a
+          // lone '*' closer outside it. It does not block a '**' closer
+          // (an outer strong still forms).
+          if (cand.t === 'strong-close' && cand.blocksOuter && closer.n === 1) depth++;
           continue;
         }
         if (/^(em|strong|del)-open$/.test(cand.t)) { depth--; continue; }
