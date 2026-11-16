@@ -810,7 +810,14 @@ function resolveDelimiters(tokens) {
       let depth = 0;
       for (let k = ci - 1; k >= 0; k--) {
         const cand = tokens[k];
-        if (/^(em|strong|del)-close$/.test(cand.t)) { depth++; continue; }
+        if (/^(em|strong|del)-close$/.test(cand.t)) {
+          depth++;
+          // A strong closer that is followed by a letter/digit and whose
+          // matching opener was preceded by whitespace opens a new scope
+          // as well, so an opener beyond it cannot pair outside it.
+          if (cand.t === 'strong-close' && cand.blocksOuter) depth++;
+          continue;
+        }
         if (/^(em|strong|del)-open$/.test(cand.t)) { depth--; continue; }
         if (cand.t !== 'delim' || cand.ch !== closer.ch || !cand.canOpen || cand.n === 0) continue;
         if (depth !== 0) continue;
@@ -836,7 +843,20 @@ function resolveDelimiters(tokens) {
       }
       const use = opener.ch === '~' ? opener.n : ((opener.n >= 2 && closer.n >= 2) ? 2 : 1);
       const kind = opener.ch === '~' ? 'del' : (use === 2 ? 'strong' : 'em');
-      tokens.splice(ci, 0, { t: kind + '-close' });
+      const closeTok = { t: kind + '-close' };
+      // A strong whose opener is open-only (preceded by whitespace) and
+      // whose closer is followed by a letter/digit blocks an outer
+      // emphasis from pairing across it.
+      if (kind === 'strong' && !opener.canClose) {
+        let nextCh = '';
+        for (let k = ci + 1; k < tokens.length; k++) {
+          const c = tokenFirstChar(tokens[k]);
+          if (c) { nextCh = c; break; }
+          if (tokens[k].t === 'br') { nextCh = '\n'; break; }
+        }
+        if (/[A-Za-z0-9]/.test(nextCh)) closeTok.blocksOuter = true;
+      }
+      tokens.splice(ci, 0, closeTok);
       tokens.splice(oi + 1, 0, { t: kind + '-open' });
       opener.n -= use;
       closer.n -= use;
