@@ -248,6 +248,12 @@ function tokenText(tok) {
   }
 }
 function tokenFirstChar(tok) {
+  // A code span is delimited by backticks in the source, so the
+  // character adjacent to a neighbouring delimiter is the backtick,
+  // not the code content's first character (this matters for '_'
+  // flanking: `a`__init__`b` forms a strong because the '__' is
+  // preceded/followed by punctuation, not by a letter).
+  if (tok.t === 'code') return '`';
   const s = tokenText(tok);
   for (let k = 0; k < s.length; k++) {
     if (s[k] !== '\u0001' && s[k] !== '\u0002') return s[k];
@@ -255,6 +261,7 @@ function tokenFirstChar(tok) {
   return '';
 }
 function tokenLastChar(tok) {
+  if (tok.t === 'code') return '`';
   const s = tokenText(tok);
   for (let k = s.length - 1; k >= 0; k--) {
     if (s[k] !== '\u0001' && s[k] !== '\u0002') return s[k];
