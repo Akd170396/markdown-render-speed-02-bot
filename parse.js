@@ -1564,11 +1564,12 @@ function renderBlocks(src, links, tight, collectOnly, lazySet, inList, groupStar
       if (!collectOnly) {
         let text = lines.slice(i, j).join('\n');
         // The block's text ends with a newline only when it is followed
-        // by no blank line (a non-blank line next, or end of input with
-        // a newline). A truly empty line swallows the newline; a line
-        // holding only spaces or tabs does not (the reference keeps it).
+        // by no blank line. Types 6-7 end at a blank line, so when one
+        // follows (j < n) it swallows the newline, whatever it holds
+        // (empty, spaces, or tabs). Types 1-5 end at a marker: the
+        // newline is kept unless the next line is truly empty.
         if (j < n) {
-          if (lines[j] !== '') text += '\n';
+          if (hbType <= 5 && lines[j] !== '') text += '\n';
         } else if (src.endsWith('\n')) {
           text += '\n';
         }
