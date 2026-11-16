@@ -200,7 +200,8 @@ function cleanUrl(url) {
 
 // Normalize a link reference label: casefold and collapse whitespace runs.
 function normalizeLabel(s) {
-  return s.replace(/[ \t\r\n]+/g, ' ').trim().toLowerCase();
+  // Unicode case folding maps ß and ẞ to "ss" (toLowerCase alone gives ß).
+  return s.replace(/[ \t\r\n]+/g, ' ').trim().toLowerCase().replace(/[ßẞ]/g, 'ss');
 }
 
 
@@ -355,7 +356,11 @@ function matchAutolink(src, i) {
 }
 
 // Try to match raw HTML at src[i] === '<'. Returns { html, end } or null.
-const HTML_TAG_RE = /^<\/?[A-Za-z][A-Za-z0-9-]*(?:[ \t\n]+[A-Za-z_:][A-Za-z0-9_.:-]*(?:[ \t\n]*=[ \t\n]*(?:[^ \t\n"'=<>`]+|'[^'\n]*'|"[^"\n]*"))?)*[ \t\n]*\/?>/;
+// A closing tag may not carry attributes; a quoted attribute value may
+// contain any character except its quote, including a newline.
+const HTML_OPEN_TAG_RE = /^<[A-Za-z][A-Za-z0-9-]*(?:[ \t\n]+[A-Za-z_:][A-Za-z0-9_.:-]*(?:[ \t\n]*=[ \t\n]*(?:[^ \t\n"'=<>`]+|'[^']*'|"[^"]*"))?)*[ \t\n]*\/?>/;
+const HTML_CLOSE_TAG_RE = /^<\/[A-Za-z][A-Za-z0-9-]*[ \t\n]*>/;
+const HTML_TAG_RE = HTML_OPEN_TAG_RE;
 function matchHtml(src, i) {
   const rest = src.slice(i);
   if (rest.startsWith('<!--')) {
@@ -379,7 +384,7 @@ function matchHtml(src, i) {
     return null;
   }
   if (/^<!/.test(rest)) return null;
-  const m = HTML_TAG_RE.exec(rest);
+  const m = rest.startsWith('</') ? HTML_CLOSE_TAG_RE.exec(rest) : HTML_OPEN_TAG_RE.exec(rest);
   if (m) return { html: m[0], end: i + m[0].length };
   return null;
 }
@@ -493,7 +498,12 @@ function scanInline(src, defs) {
   while (i < len) {
     const ch = src[i];
     if (ch === '\\') {
-      if (i + 1 < len && src[i + 1] === '\n') { tokens.push({ t: 'br' }); i += 2; continue; }
+      if (i + 1 < len && src[i + 1] === '\n') {
+        tokens.push({ t: 'br' }); i += 2;
+        // A hard break strips the leading spaces/tabs of the next line.
+        while (i < len && (src[i] === ' ' || src[i] === '\t')) i++;
+        continue;
+      }
       if (i + 1 < len && isPunct(src[i + 1])) { pushText('\u0001' + src[i + 1]); i += 2; continue; }
       pushText('\\'); i++; continue;
     }
@@ -539,23 +549,31 @@ function scanInline(src, defs) {
       const openTok = brackets.pop();
       if (!openTok) { pushText(']'); i++; continue; }
       const oi = tokens.indexOf(openTok);
+      const isImg = openTok.s === '![';
+      // A link's text may not contain another link (an image inside is
+      // fine); an image's alt text is plain text, so a link or image
+      // inside it does not block formation.
       let hasLink = false;
-      for (let k = oi + 1; k < tokens.length; k++) {
-        if (tokens[k].t === 'link') { hasLink = true; break; }
+      if (!isImg) {
+        for (let k = oi + 1; k < tokens.length; k++) {
+          if (tokens[k].t === 'link') { hasLink = true; break; }
+        }
       }
       let formed = false;
       if (!hasLink) {
         const labelRaw = src.slice(openTok.srcIndex + 1, i);
-        const labelText = labelRaw.replace(/\\([!\"#$%&'()*+,\-./:;<=>?@\[\\\]^_`{|}~])/g, '$1');
+        // Labels keep backslashes raw (no escape resolution).
+        const labelText = labelRaw;
         let href = null, title = null, end = i + 1;
         const j = i + 1;
         if (src[j] === '(') {
           const d = parseInlineDest(src, j + 1);
           if (d) { href = unescapeEntities(d.href); title = d.title !== null ? unescapeEntities(d.title) : null; end = d.end; }
-        } else if (src[j] === '[') {
+        }
+        if (href === null && src[j] === '[') {
           let m = j + 1, label = '', ok = false;
           while (m < len) {
-            if (src[m] === '\\' && m + 1 < len && isPunct(src[m + 1])) { label += src[m + 1]; m += 2; continue; }
+            if (src[m] === '\\' && m + 1 < len) { label += src[m] + src[m + 1]; m += 2; continue; }
             if (src[m] === ']') { ok = true; break; }
             label += src[m]; m++;
           }
@@ -564,7 +582,11 @@ function scanInline(src, defs) {
             const def = defs.get(key);
             if (def) { href = def.href; title = def.title; end = m + 1; }
           }
-        } else {
+        }
+        if (href === null && src[j] !== '[') {
+          // Shortcut reference: also the fallback when an inline
+          // destination failed to parse. A failed full reference does
+          // NOT fall back to the shortcut.
           const def = defs.get(normalizeLabel(labelText));
           if (def) { href = def.href; title = def.title; end = i + 1; }
         }
@@ -611,10 +633,13 @@ function scanInline(src, defs) {
         last.s = last.s.replace(/ {2,}$/, '');
         if (last.s === '') tokens.pop();
         tokens.push({ t: 'br' });
+        i++;
+        // A hard break strips the leading spaces/tabs of the next line.
+        while (i < len && (src[i] === ' ' || src[i] === '\t')) i++;
       } else {
         pushText('\n');
+        i++;
       }
-      i++;
       continue;
     }
     if (ch === 'w' && src.startsWith('www.', i)) {
@@ -930,7 +955,7 @@ function matchHtmlStart(L) {
   m = /^<\/?([a-z][a-z0-9-]*)(?:[ \t/>]|$)/.exec(lower);
   if (m && BLOCK_TAGS.has(m[1])) return { type: 6, tag: m[1] };
   // Type 7: a complete tag alone on the line.
-  const tag = HTML_TAG_RE.exec(rest);
+  const tag = rest.startsWith('</') ? HTML_CLOSE_TAG_RE.exec(rest) : HTML_OPEN_TAG_RE.exec(rest);
   if (tag && rest.slice(tag[0].length).trim() === '') return { type: 7 };
   return null;
 }
@@ -1006,16 +1031,16 @@ function tryParseDef(lines, i, defs) {
     text += '\n' + lines[i + k].s;
     linesUsed = k + 1;
   }
-  let depth = 0, k = 0, label = '', closed = -1;
-  for (k = 0; k < text.length; k++) {
+  // A label ends at the FIRST unescaped ']' (nested brackets do not
+  // extend it) and keeps backslashes raw: escapes are not resolved in
+  // labels, so [foo\!] does not match a [foo!] definition. A label may
+  // not contain an unescaped '['.
+  let k = 0, label = '', closed = -1;
+  for (k = 1; k < text.length; k++) {
     const c = text[k];
-    if (c === '\\' && k + 1 < text.length && isPunct(text[k + 1])) { label += text[k + 1]; k++; continue; }
-    if (c === '[') { depth++; if (depth > 1) label += c; continue; }
-    if (c === ']') {
-      depth--;
-      if (depth === 0) { closed = k; break; }
-      label += c; continue;
-    }
+    if (c === '\\' && k + 1 < text.length) { label += c + text[k + 1]; k++; continue; }
+    if (c === '[') return null;
+    if (c === ']') { closed = k; break; }
     label += c;
   }
   if (closed < 0 || label === '' || label.length > 999) return null;
