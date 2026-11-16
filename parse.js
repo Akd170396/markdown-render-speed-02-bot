@@ -1337,9 +1337,13 @@ function parseFenced(lines, i) {
   const f = matchFence(lines[i]);
   let j = i + 1;
   const content = [];
+  // A backtick fence's indent is stripped from its content lines; a
+  // tilde fence's indent is not (its content keeps its leading
+  // spaces verbatim).
+  const strip = f.ch === '~' ? 0 : f.ind;
   while (j < lines.length) {
     if (isClosingFence(lines[j], f.ch, f.len)) break;
-    content.push(stripCols(lines[j], f.ind).s);
+    content.push(stripCols(lines[j], strip).s);
     j++;
   }
   const end = j < lines.length ? j + 1 : j;
