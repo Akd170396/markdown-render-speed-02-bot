@@ -340,7 +340,7 @@ function matchAutolink(src, i) {
       while (e < len && src[e] !== ' ' && src[e] !== '\t' && src[e] !== '\n' && src[e] !== '<' && src[e] !== '>') e++;
       if (e < len && src[e] === '>' && e > s + 1) {
         const text = src.slice(i + 1, e);
-        return { t: 'link', href: encodeURI(text), title: null, plain: text, html: renderText(text), end: e + 1 };
+        return { t: 'link', href: encodeURI(text), title: null, plain: text, html: renderText(text), end: e + 1, auto: 'angle' };
       }
     }
   }
@@ -350,7 +350,7 @@ function matchAutolink(src, i) {
   const em = emailRe.exec(sub);
   if (em) {
     const text = em[0].slice(0, -1);
-    return { t: 'link', href: 'mailto:' + text, title: null, plain: text, html: renderText(text), end: i + 1 + em[0].length };
+    return { t: 'link', href: 'mailto:' + text, title: null, plain: text, html: renderText(text), end: i + 1 + em[0].length, auto: 'angle' };
   }
   return null;
 }
@@ -424,7 +424,7 @@ function matchExtendedAutolink(src, i) {
     const m = /^[A-Za-z0-9-]+\.[A-Za-z0-9.-]*[A-Za-z0-9](?:[/?#][^\s<>]*)?/.exec(rest.slice(4));
     if (m) {
       let text = 'www.' + trimAutolinkEnd(m[0]);
-      return { t: 'link', href: encodeURI('http://' + text), title: null, plain: text, html: renderText(text), end: i + text.length };
+      return { t: 'link', href: encodeURI('http://' + text), title: null, plain: text, html: renderText(text), end: i + text.length, auto: 'ext' };
     }
     return null;
   }
@@ -432,7 +432,7 @@ function matchExtendedAutolink(src, i) {
   const sm = /^([A-Za-z][A-Za-z0-9+.-]{1,31}):\/\/[^\s<>]+/.exec(rest);
   if (sm) {
     let text = trimAutolinkEnd(sm[0]);
-    return { t: 'link', href: encodeURI(text), title: null, plain: text, html: renderText(text), end: i + text.length };
+    return { t: 'link', href: encodeURI(text), title: null, plain: text, html: renderText(text), end: i + text.length, auto: 'ext' };
   }
   // scheme:email (mailto:, xmpp:, ...) with an optional single path
   // segment. The scheme is 2-32 chars; the address must be an email.
@@ -449,7 +449,7 @@ function matchExtendedAutolink(src, i) {
       const pm = /^\/[^\s<>\/]+/.exec(p);
       if (pm) text += pm[0];
       text = trimAutolinkEnd(text);
-      return { t: 'link', href: text, title: null, plain: text, html: renderText(text), end: i + text.length };
+      return { t: 'link', href: text, title: null, plain: text, html: renderText(text), end: i + text.length, auto: 'ext' };
     }
     // A scheme followed by a non-email is not an autolink; fall through
     // so the email part alone is not linked either (the scheme stays).
@@ -464,7 +464,7 @@ function matchExtendedAutolink(src, i) {
       const nx = rest[em[0].length];
       if (nx === '-' || nx === '_') return null;
       const text = em[0];
-      return { t: 'link', href: 'mailto:' + text, title: null, plain: text, html: renderText(text), end: i + text.length };
+      return { t: 'link', href: 'mailto:' + text, title: null, plain: text, html: renderText(text), end: i + text.length, auto: 'ext' };
     }
   }
   return null;
@@ -580,13 +580,13 @@ function scanInline(src, defs) {
       if (!openTok) { pushText(']'); i++; continue; }
       const oi = tokens.indexOf(openTok);
       const isImg = openTok.s === '![';
-      // A link's text may not contain another link (an image inside is
-      // fine); an image's alt text is plain text, so a link or image
-      // inside it does not block formation.
+      // A link's text may not contain another (bracket) link; an
+      // autolink inside does not block formation. An image's alt text
+      // is plain text, so a link or image inside it does not block.
       let hasLink = false;
       if (!isImg) {
         for (let k = oi + 1; k < tokens.length; k++) {
-          if (tokens[k].t === 'link') { hasLink = true; break; }
+          if (tokens[k].t === 'link' && !tokens[k].auto) { hasLink = true; break; }
         }
       }
       let formed = false;
@@ -624,6 +624,11 @@ function scanInline(src, defs) {
           const clean = cleanUrl(href);
           if (clean !== null) {
             const sub = tokens.slice(oi + 1);
+            // An extended autolink inside a link's text becomes plain
+            // text; an angle-bracket autolink stays a (nested) link.
+            for (let k = 0; k < sub.length; k++) {
+              if (sub[k].t === 'link' && sub[k].auto === 'ext') sub[k] = { t: 'text', s: sub[k].plain };
+            }
             resolveDelimiters(sub);
             const textHtml = renderTokens(sub);
             const plain = plainTextOf(sub);
@@ -1250,8 +1255,10 @@ function parseTable(lines, i, defs, collect) {
   return { html: out, end: j };
 }
 
-function canInterruptParagraphList(lines, j, m) {
-  if (m.type === 'ordered' && m.start !== 1) return false;
+function canInterruptParagraphList(lines, j, m, inList) {
+  // An ordered list may interrupt a paragraph only when it starts with
+  // 1 -- except inside a list item, where any start number interrupts.
+  if (m.type === 'ordered' && m.start !== 1 && !inList) return false;
   if (m.content.s.trim() !== '') return true;
   let k = j + 1;
   while (k < lines.length) {
@@ -1261,7 +1268,7 @@ function canInterruptParagraphList(lines, j, m) {
   return false;
 }
 
-function parseParagraph(lines, i, defs, tight, firstCheckbox, collect) {
+function parseParagraph(lines, i, defs, tight, firstCheckbox, collect, inList) {
   let j = i;
   while (j < lines.length) {
     const d = tryParseDef(lines, j, defs);
@@ -1304,7 +1311,7 @@ function parseParagraph(lines, i, defs, tight, firstCheckbox, collect) {
       const h = matchHtmlStart(L);
       if (h && h.type !== 7) break;
       const m = matchListMarker(L);
-      if (m && !L.lazy && canInterruptParagraphList(lines, j, m)) break;
+      if (m && !L.lazy && canInterruptParagraphList(lines, j, m, inList)) break;
     }
     para.push(L);
     j++;
@@ -1367,7 +1374,7 @@ function parseBlockquote(lines, i, defs, collect) {
   }
   const lastInner = inner[inner.length - 1];
   if (lastInner && lastInner.s !== '' && isBlankLine(lastInner)) lastInner.keepSpace = true;
-  const innerParsed = parseBlocks(inner, defs, false, false, collect, false);
+  const innerParsed = parseBlocks(inner, defs, false, false, collect, false, false);
   return { html: '<blockquote>\n' + innerParsed.html + '</blockquote>\n', end: j };
 }
 
@@ -1393,7 +1400,14 @@ function collectListItem(lines, start, marker) {
         for (let b = 0; b < trailingBlanks; b++) itemLines.push({ s: '', b: 0, nl: lines[j - trailingBlanks + b].nl });
         trailingBlanks = 0;
       }
-      const stripped = stripCols(L, marker.contentIndent);
+      let stripped = stripCols(L, marker.contentIndent);
+      // A tab at the start of a list item's content line is expanded
+      // to spaces at its column (a fenced block's own indent strip
+      // does not expand it, so this lives here, not in stripCols).
+      while (stripped.s.startsWith('\t')) {
+        const w = 4 - (stripped.b % 4);
+        stripped = { s: ' '.repeat(w) + stripped.s.slice(1), b: stripped.b + w, nl: stripped.nl };
+      }
       itemLines.push(stripped);
       trackerUpdate(tr, stripped);
       sawContent = true;
@@ -1462,20 +1476,20 @@ function parseList(lines, i, defs, collect) {
   // An item loosens its list only when its own top-level blocks are
   // separated by a blank line; a blank inside a nested block does not.
   for (const item of items) {
-    const probe = parseBlocks(item.lines, defs, true, true, true, false);
+    const probe = parseBlocks(item.lines, defs, true, true, true, false, true);
     if (probe.loose) { loose = true; break; }
   }
   let out = first.type === 'bullet' ? '<ul>\n' : (first.start !== 1 ? '<ol start="' + first.start + '">\n' : '<ol>\n');
   const tight = !loose;
   for (const item of items) {
-    const parsed = parseBlocks(item.lines, defs, tight, true, collect, false);
+    const parsed = parseBlocks(item.lines, defs, tight, true, collect, false, true);
     out += '<li>' + parsed.html + '</li>\n';
   }
   out += first.type === 'bullet' ? '</ul>\n' : '</ol>\n';
   return { html: out, end: j };
 }
 
-function parseBlocks(lines, defs, tight, firstCheckbox, collect, topLevel) {
+function parseBlocks(lines, defs, tight, firstCheckbox, collect, topLevel, inList) {
   let out = '';
   let seenBlock = false;
   let seenBlankAfterBlock = false;
@@ -1519,7 +1533,7 @@ function parseBlocks(lines, defs, tight, firstCheckbox, collect, topLevel) {
       }
     }
     if (!res) {
-      const p = parseParagraph(lines, i, defs, tight, first && firstCheckbox, collect);
+      const p = parseParagraph(lines, i, defs, tight, first && firstCheckbox, collect, inList);
       if (p.tableAt >= 0) {
         res = parseTable(lines, p.tableAt, defs, collect);
       } else {
@@ -1548,6 +1562,6 @@ export function parse(src) {
   // Two passes: first collect every link reference definition in the
   // document (a definition may sit after the paragraph that uses it),
   // then render with the complete map.
-  parseBlocks(lines, defs, false, false, true, true);
-  return parseBlocks(lines, defs, false, false, false, true).html;
+  parseBlocks(lines, defs, false, false, true, true, false);
+  return parseBlocks(lines, defs, false, false, false, true, false).html;
 }
