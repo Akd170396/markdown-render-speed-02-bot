@@ -106,8 +106,9 @@ function decodeNumeric(body) {
   return String.fromCodePoint(cp);
 }
 
-// Unescape entities in a link destination or title: named entities from the
-// table and numeric references are decoded; anything else stays literal.
+// Unescape a link destination or title: only numeric references are
+// decoded (marked keeps &name; references as-is there); anything else
+// stays literal.
 function unescapeEntities(s) {
   if (s.indexOf('&') < 0) return s;
   let out = '';
@@ -125,8 +126,6 @@ function unescapeEntities(s) {
       if (dec !== null) { out += dec; i = semi + 1; continue; }
       out += '&'; i = amp + 1; continue;
     }
-    const ch = ENTITIES[body];
-    if (ch !== undefined) { out += ch; i = semi + 1; continue; }
     out += '&'; i = amp + 1;
   }
   return out;
@@ -170,6 +169,25 @@ function renderText(s) {
 // already been unescaped).
 function escapeAll(s) {
   return escapeTextRaw(s);
+}
+
+// Escape text without decoding numeric references: < > " ' always, and &
+// unless it starts a reference that looks like &#digits; / &#xhex; /
+// &word;. Used for link destinations, titles and fence info strings, where
+// marked keeps entity-looking text as-is.
+function escapeTextOnly(s) {
+  return s.replace(ESCAPE_TEXT_RE, (m) => {
+    if (m === '&') return '&amp;';
+    if (m === '<') return '&lt;';
+    if (m === '>') return '&gt;';
+    if (m === '"') return '&quot;';
+    return '&#39;';
+  });
+}
+
+// Resolve backslash escapes in a short string (fence info word).
+function unescapeBackslashes(s) {
+  return s.replace(/\\([!\"#$%&'()*+,\-./:;<=>?@\[\\\]^_`{|}~])/g, '$1');
 }
 
 // Block dangerous URL schemes the way marked's cleanUrl does. Returns the
@@ -706,15 +724,15 @@ function renderTokens(tokens) {
       case 'html': out += tok.s; break;
       case 'br': out += '<br>'; break;
       case 'link': {
-        out += '<a href="' + renderText(tok.href) + '"';
-        if (tok.title !== null && tok.title !== undefined) out += ' title="' + renderText(tok.title) + '"';
+        out += '<a href="' + escapeTextOnly(tok.href) + '"';
+        if (tok.title !== null && tok.title !== undefined) out += ' title="' + escapeTextOnly(tok.title) + '"';
         out += '>' + tok.html + '</a>';
         break;
       }
       case 'img': {
-        out += '<img src="' + renderText(tok.src) + '" alt="' + renderText(tok.alt) + '"';
-        if (tok.title !== null && tok.title !== undefined) out += ' title="' + renderText(tok.title) + '"';
-        out += '/>';
+        out += '<img src="' + escapeTextOnly(tok.src) + '" alt="' + renderText(tok.alt) + '"';
+        if (tok.title !== null && tok.title !== undefined) out += ' title="' + escapeTextOnly(tok.title) + '"';
+        out += '>';
         break;
       }
       case 'em-open': out += '<em>'; break;
@@ -1007,7 +1025,7 @@ function tryParseDef(lines, i, defs) {
 // Does a line start a block that can interrupt a paragraph (other than a
 // fenced code block, which callers check separately)?
 function isBlockStartLine(L) {
-  if (matchAtx(L) || isHrLine(L) || matchBlockquote(L) || matchListMarker(L) || matchSetext(L) || matchTableDelim(L)) return true;
+  if (matchAtx(L) || isHrLine(L) || matchBlockquote(L) || matchListMarker(L) || matchSetext(L)) return true;
   const h = matchHtmlStart(L);
   return !!h && h.type !== 7;
 }
@@ -1042,7 +1060,7 @@ function parseFenced(lines, i) {
   }
   const end = j < lines.length ? j + 1 : j;
   let html = '<pre><code';
-  if (f.info) html += ' class="language-' + escapeAll(f.info.split(/[ \t]/)[0]) + '"';
+  if (f.info) html += ' class="language-' + escapeTextOnly(unescapeBackslashes(f.info.split(/[ \t]/)[0])) + '"';
   html += '>' + escapeAll(content.length ? content.join('\n') + '\n' : '') + '</code></pre>\n';
   return { html, end };
 }
@@ -1051,7 +1069,7 @@ function parseIndentedCode(lines, i) {
   let j = i, lastContent = i;
   while (j < lines.length) {
     const L = lines[j];
-    if (isBlankLine(L)) { content.push(''); j++; continue; }
+    if (isBlankLine(L)) { content.push(stripCols(L, 4).s); j++; continue; }
     const ind = lineIndent(L);
     if (ind.cols < 4) break;
     content.push(stripCols(L, 4).s);
@@ -1084,7 +1102,8 @@ function parseHtmlBlock(lines, i) {
   let html = '';
   for (let k = i; k < j; k++) {
     html += lines[k].s;
-    if (lines[k].nl) html += '\n';
+    if (k + 1 < j) html += '\n';
+    else if (lines[k].nl && (j >= lines.length || !isBlankLine(lines[j]))) html += '\n';
   }
   return { html, end: j };
 }
@@ -1141,6 +1160,7 @@ function parseParagraph(lines, i, defs, tight, firstCheckbox, collect) {
   while (j < lines.length) {
     const L = lines[j];
     if (isBlankLine(L)) break;
+    if (L.endsPara) { para.push(L); j++; break; }
     const ind = lineIndent(L);
     if (ind.cols <= 3) {
       const st = matchSetext(L);
@@ -1149,8 +1169,19 @@ function parseParagraph(lines, i, defs, tight, firstCheckbox, collect) {
         const al = matchTableDelim(L);
         if (al) {
           const headerCells = splitTableRow(para[0].s.slice(lineIndent(para[0]).pos));
-          if (headerCells.length === al.length) { tableAt = start; break; }
+          if (headerCells.length === al.length && !(L.lazy === 'bq' && para[0].lazy !== 'bq')) { tableAt = start; break; }
         }
+      }
+      // A line followed by a table delimiter starts a table, so it does not
+      // continue this paragraph. A lazy line (gathered inside a blockquote
+      // or list item) only breaks out when its cell count matches the
+      // delimiter's column count.
+      const nx = lines[j + 1];
+      const nal = nx ? matchTableDelim(nx) : null;
+      if (nal) {
+        if (!L.lazy) break;
+        const hdrCells = splitTableRow(L.s.slice(ind.pos));
+        if (hdrCells.length === nal.length) break;
       }
       if (matchAtx(L) || matchFence(L) || isHrLine(L) || matchBlockquote(L)) break;
       const h = matchHtmlStart(L);
@@ -1164,7 +1195,8 @@ function parseParagraph(lines, i, defs, tight, firstCheckbox, collect) {
   if (tableAt >= 0) return { html: '', end: start, tableAt };
   const text = para.map((L) => L.s).join('\n');
   if (setextLevel) {
-    return { html: '<h' + setextLevel + '>' + (collect ? '' : parseInline(text, defs)) + '</h' + setextLevel + '>\n', end: j, tableAt: -1 };
+    const trimmed = text.replace(/^[ \t]+/, '').replace(/[ \t]+$/, '');
+    return { html: '<h' + setextLevel + '>' + (collect ? '' : parseInline(trimmed, defs)) + '</h' + setextLevel + '>\n', end: j, tableAt: -1 };
   }
   if (firstCheckbox) {
     const cb = /^\[([ xX])\](?:[ \t]+([\s\S]*)|[ \t]*)$/.exec(text);
@@ -1202,11 +1234,23 @@ function parseBlockquote(lines, i, defs, collect) {
       }
       break;
     }
-    if (tr.inPara && !isBlockStartLine(L) && !matchFence(L)) {
-      inner.push(L);
-      trackerUpdate(tr, L);
-      j++;
-      continue;
+    if (tr.inPara && !matchFence(L)) {
+      // A lazy '=' setext underline is kept as paragraph text by indenting
+      // it four spaces, so it cannot turn the paragraph into a heading.
+      if (matchSetext(L) === 1) {
+        const indented = { s: '    ' + L.s, b: 0, nl: L.nl };
+        inner.push(indented);
+        trackerUpdate(tr, indented);
+        j++;
+        continue;
+      }
+      if (!isBlockStartLine(L)) {
+        const lazyLine = { ...L, lazy: 'bq' };
+        inner.push(lazyLine);
+        trackerUpdate(tr, lazyLine);
+        j++;
+        continue;
+      }
     }
     break;
   }
@@ -1243,16 +1287,29 @@ function collectListItem(lines, start, marker) {
       j++;
       continue;
     }
+    if (isHrLine(L)) break;
     const m2 = matchListMarker(L);
     if (m2) break;
     if (trailingBlanks > 0) break;
-    if (tr.inPara && !isBlockStartLine(L) && !matchFence(L)) {
-      itemLines.push(L);
-      trackerUpdate(tr, L);
-      sawContent = true;
-      end = j + 1;
-      j++;
-      continue;
+    if (tr.inPara && !matchFence(L)) {
+      // A lazy '=' setext underline stays literal text and ends the
+      // paragraph; the next line starts a new paragraph inside the item.
+      if (matchSetext(L) === 1) {
+        itemLines.push({ ...L, lazy: 'li', endsPara: true });
+        trackerUpdate(tr, L);
+        sawContent = true;
+        end = j + 1;
+        j++;
+        continue;
+      }
+      if (!isBlockStartLine(L)) {
+        itemLines.push({ ...L, lazy: 'li' });
+        trackerUpdate(tr, L);
+        sawContent = true;
+        end = j + 1;
+        j++;
+        continue;
+      }
     }
     break;
   }
@@ -1265,6 +1322,7 @@ function parseList(lines, i, defs, collect) {
   let j = i;
   let loose = false;
   while (j < lines.length) {
+    if (isHrLine(lines[j])) break;
     const m = matchListMarker(lines[j]);
     if (!m || m.type !== first.type) break;
     if (first.type === 'ordered' && m.delim !== first.delim) break;
@@ -1351,8 +1409,10 @@ function parseBlocks(lines, defs, tight, firstCheckbox, collect) {
 
 export function parse(src) {
   src = src.replace(/\r\n?/g, '\n');
+  const endsWithNL = src.endsWith('\n');
   const rawLines = src.split('\n');
-  const lines = rawLines.map((s, idx) => ({ s, b: 0, nl: idx < rawLines.length - 1 }));
+  if (endsWithNL) rawLines.pop();
+  const lines = rawLines.map((s, idx) => ({ s, b: 0, nl: idx < rawLines.length - 1 || endsWithNL }));
   const defs = new Map();
   // Two passes: first collect every link reference definition in the
   // document (a definition may sit after the paragraph that uses it),
