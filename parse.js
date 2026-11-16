@@ -206,9 +206,14 @@ function labelEnd(src, open) {
       // run need not match the opening length), and consumes 2+ backticks
       // immediately before ']'. A run with no later run and not before
       // ']' cannot be in a label, so the label does not close here.
+      // The ``+(?=]) atom is checked first: a run of 2+ backticks
+      // immediately before ']' closes the code-span part and the ']'
+      // ends the label, even when a later backtick run exists further
+      // on in the paragraph.
       let m = k;
       while (m < n && src[m] === '`') m++;
       const run = m - k;
+      if (run >= 2 && src[m] === ']') { k = m; continue; }
       let j = m;
       let closed = -1;
       while (j < n) {
@@ -220,10 +225,7 @@ function labelEnd(src, open) {
         }
         j++;
       }
-      if (closed < 0) {
-        if (run >= 2 && src[m] === ']') { k = m; continue; }
-        return -1;
-      }
+      if (closed < 0) return -1;
       k = closed;
       continue;
     }
