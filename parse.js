@@ -417,14 +417,34 @@ function trimAutolinkEnd(s) {
 
 // Try to match an extended autolink (www., scheme://, email) at src[i].
 // Returns { t:'link', href, plain, end } or null.
-// Inside a bracket link's text, an extended autolink must not swallow
-// the ']' that closes the bracket when that ']' starts a link
-// destination ('](' or ']['). Truncate the autolink text at the first
-// such ']' so the bracket can close and the link can form. Outside
-// brackets (or when ']' is not followed by '(' or '[') the ']' stays.
-function truncateAtBracketClose(text) {
+// An extended autolink must not swallow the ']' that closes a bracket
+// link when that ']' starts a valid link destination ('](' with a
+// valid destination, or ']['): truncate before such a ']' so the
+// bracket can close and the link can form. Otherwise a ']' followed
+// by '(' ends the autolink after the ']' unless the '(' is closed by
+// a ')' inside the autolink text itself (the '](...)' is part of the
+// URL, e.g. https://a.b/c](https://dest)); an unclosed '(' means the
+// '](...)' is a link-like tail the autolink must not swallow.
+function truncateAtBracketClose(src, i, text, inBrackets) {
   for (let k = 0; k < text.length; k++) {
-    if (text[k] === ']' && (text[k + 1] === '(' || text[k + 1] === '[')) return text.slice(0, k);
+    if (text[k] !== ']') continue;
+    const nx = text[k + 1];
+    if (nx === '(') {
+      if (inBrackets) {
+        const d = parseInlineDest(src, i + k + 2);
+        if (d) return text.slice(0, k);
+      }
+      // Is the '(' closed by a ')' inside the autolink text?
+      let depth = 1;
+      let closed = false;
+      for (let m = k + 2; m < text.length; m++) {
+        if (text[m] === '(') depth++;
+        else if (text[m] === ')') { depth--; if (depth === 0) { closed = true; break; } }
+      }
+      if (!closed) return text.slice(0, k + 1);
+    } else if (nx === '[') {
+      return text.slice(0, k);
+    }
   }
   return text;
 }
@@ -458,10 +478,10 @@ function matchExtendedAutolink(src, i, inBrackets, tokens) {
   const rest = src.slice(i);
   // www.
   if (rest.startsWith('www.')) {
-    const m = /^[A-Za-z0-9-]+\.[A-Za-z0-9.-]*[A-Za-z0-9](?:[/?#][^\s<>]*)?/.exec(rest.slice(4));
+    const m = /^[A-Za-z0-9-]+(?:\.[A-Za-z0-9.-]*[A-Za-z0-9])?(?:[/?#][^\s<>]*)?/.exec(rest.slice(4));
     if (m) {
       let text = 'www.' + trimAutolinkEnd(m[0]);
-      if (inBrackets) text = truncateAtBracketClose(text);
+      text = truncateAtBracketClose(src, i, text, inBrackets);
       if (!text || text === 'www.') return null;
       return { t: 'link', href: encodeURI('http://' + text), title: null, plain: text, html: renderText(text), end: i + text.length, auto: 'ext' };
     }
@@ -471,7 +491,7 @@ function matchExtendedAutolink(src, i, inBrackets, tokens) {
   const sm = /^([A-Za-z][A-Za-z0-9+.-]{1,31}):\/\/[^\s<>]+/.exec(rest);
   if (sm) {
     let text = trimAutolinkEnd(sm[0]);
-    if (inBrackets) text = truncateAtBracketClose(text);
+    text = truncateAtBracketClose(src, i, text, inBrackets);
     if (!text) return null;
     return { t: 'link', href: encodeURI(text), title: null, plain: text, html: renderText(text), end: i + text.length, auto: 'ext' };
   }
