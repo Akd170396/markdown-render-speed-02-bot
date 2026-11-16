@@ -417,13 +417,28 @@ function trimAutolinkEnd(s) {
 
 // Try to match an extended autolink (www., scheme://, email) at src[i].
 // Returns { t:'link', href, plain, end } or null.
-function matchExtendedAutolink(src, i) {
+// Inside a bracket link's text, an extended autolink must not swallow
+// the ']' that closes the bracket when that ']' starts a link
+// destination ('](' or ']['). Truncate the autolink text at the first
+// such ']' so the bracket can close and the link can form. Outside
+// brackets (or when ']' is not followed by '(' or '[') the ']' stays.
+function truncateAtBracketClose(text) {
+  for (let k = 0; k < text.length; k++) {
+    if (text[k] === ']' && (text[k + 1] === '(' || text[k + 1] === '[')) return text.slice(0, k);
+  }
+  return text;
+}
+function matchExtendedAutolink(src, i, inBrackets) {
+  // Suppressed while an unclosed <a> tag is open (document-wide state).
+  if (inAnchor) return null;
   const rest = src.slice(i);
   // www.
   if (rest.startsWith('www.')) {
     const m = /^[A-Za-z0-9-]+\.[A-Za-z0-9.-]*[A-Za-z0-9](?:[/?#][^\s<>]*)?/.exec(rest.slice(4));
     if (m) {
       let text = 'www.' + trimAutolinkEnd(m[0]);
+      if (inBrackets) text = truncateAtBracketClose(text);
+      if (!text || text === 'www.') return null;
       return { t: 'link', href: encodeURI('http://' + text), title: null, plain: text, html: renderText(text), end: i + text.length, auto: 'ext' };
     }
     return null;
@@ -432,6 +447,8 @@ function matchExtendedAutolink(src, i) {
   const sm = /^([A-Za-z][A-Za-z0-9+.-]{1,31}):\/\/[^\s<>]+/.exec(rest);
   if (sm) {
     let text = trimAutolinkEnd(sm[0]);
+    if (inBrackets) text = truncateAtBracketClose(text);
+    if (!text) return null;
     return { t: 'link', href: encodeURI(text), title: null, plain: text, html: renderText(text), end: i + text.length, auto: 'ext' };
   }
   // scheme:email (mailto:, xmpp:, ...) with an optional single path
@@ -472,6 +489,17 @@ function matchExtendedAutolink(src, i) {
 
 
 // Scan an inline string into tokens (links/images resolved, emphasis not yet).
+// Document-wide anchor state: an opening <a ...> tag (with no closing
+// </a> yet) suppresses extended autolinks (email, www., scheme://) in
+// all following inline content, even across paragraphs and blocks, until
+// a </a> appears. Bracket links and angle autolinks are unaffected.
+// This mirrors marked's global link state. Reset at the start of parse().
+let inAnchor = false;
+function anchorTagState(html) {
+  const m = /^<\/?([A-Za-z][A-Za-z0-9-]*)/.exec(html);
+  if (!m || m[1].toLowerCase() !== 'a') return null;
+  return html[1] === '/' ? 'close' : 'open';
+}
 function scanInline(src, defs) {
   const len = src.length;
   const tokens = [];
@@ -564,7 +592,12 @@ function scanInline(src, defs) {
       const auto = matchAutolink(src, i);
       if (auto) { tokens.push(auto); i = auto.end; continue; }
       const html = matchHtml(src, i);
-      if (html) { tokens.push({ t: 'html', s: html.html }); i = html.end; continue; }
+      if (html) {
+        const st = anchorTagState(html.html);
+        if (st === 'open') inAnchor = true;
+        else if (st === 'close') inAnchor = false;
+        tokens.push({ t: 'html', s: html.html }); i = html.end; continue;
+      }
       pushText('<'); i++; continue;
     }
     if (ch === '[' || (ch === '!' && src[i + 1] === '[')) {
@@ -678,11 +711,11 @@ function scanInline(src, defs) {
       continue;
     }
     if (ch === 'w' && src.startsWith('www.', i)) {
-      const auto = matchExtendedAutolink(src, i);
+      const auto = matchExtendedAutolink(src, i, brackets.length > 0);
       if (auto) { tokens.push(auto); i = auto.end; continue; }
     }
     if (isLetter(ch)) {
-      const auto = matchExtendedAutolink(src, i);
+      const auto = matchExtendedAutolink(src, i, brackets.length > 0);
       if (auto) { tokens.push(auto); i = auto.end; continue; }
     }
     const before = i;
@@ -1581,6 +1614,7 @@ export function parse(src) {
   if (endsWithNL) rawLines.pop();
   const lines = rawLines.map((s, idx) => ({ s, b: 0, nl: idx < rawLines.length - 1 || endsWithNL }));
   const defs = new Map();
+  inAnchor = false;
   // Two passes: first collect every link reference definition in the
   // document (a definition may sit after the paragraph that uses it),
   // then render with the complete map.
