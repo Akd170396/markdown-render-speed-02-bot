@@ -1156,7 +1156,7 @@ function parseList(lines, i, links, collectOnly, docSt) {
 // A lazy line continues the blockquote only when the innermost paragraph
 // is open: a nested blockquote or a list item whose first line is text
 // still has its paragraph open.
-function innermostParaOpen(line) {
+function innermostParaOpen(line, paraOpen) {
   let t = line;
   for (;;) {
     const m = /^ {0,3}>([ \t]?)/.exec(t);
@@ -1166,7 +1166,11 @@ function innermostParaOpen(line) {
   t = stripIndent(t, 3);
   if (t.trim() === '') return false;
   const lm = parseMarker(t);
-  if (lm) return innermostParaOpen(lm.content);
+  if (lm) return innermostParaOpen(lm.content, paraOpen);
+  // A fence cannot interrupt an open paragraph: if a paragraph is open,
+  // a fence line is a paragraph continuation (inline code span), so the
+  // paragraph stays open.
+  if (paraOpen && /^(`{3,}|~{3,})/.test(t)) return true;
   return !startsBlockInterrupt(t);
 }
 
@@ -1187,7 +1191,7 @@ function parseBlockquote(lines, i, links, tight, collectOnly, lazySet, docSt) {
     const m = /^ {0,3}>([ \t]?)/.exec(ln);
     if (m) {
       rawLines.push(ln);
-      innerPara = innermostParaOpen(ln);
+      innerPara = innermostParaOpen(ln, innerPara);
       j++;
       continue;
     }
