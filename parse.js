@@ -671,6 +671,13 @@ function scanInline(src, defs) {
     if (ch === '`') {
       let n = 0;
       while (i + n < len && src[i + n] === '`') n++;
+      // An unclosed backtick run inside a bracket blocks the link
+      // UNLESS a SHORTER backtick run appears after it before the
+      // ']' (doc-16/18/20/22/23): '[a ``b` c]' forms, '[a ``b c]' and
+      // '[a `b c]' do not. Track the first unclosed run's length on
+      // the bracket; a shorter run clears it for good.
+      const topB0 = brackets[brackets.length - 1];
+      if (topB0 && topB0.tickBlock && n < topB0.tickBlock) { topB0.tickBlock = 0; topB0.tickRescued = true; }
       // Find the next run of exactly n backticks. A code span must not
       // span past a ']' that closes a valid inline link (the link
       // forms, the backticks stay literal) -- unless the ']'s
@@ -699,12 +706,21 @@ function scanInline(src, defs) {
           j += m;
         } else j++;
       }
-      if (close < 0) { pushText('`'.repeat(n)); i += n; continue; }
+      if (close < 0) {
+        const topB2 = brackets[brackets.length - 1];
+        if (topB2 && !topB2.tickBlock && !topB2.tickRescued) topB2.tickBlock = n;
+        pushText('`'.repeat(n)); i += n; continue;
+      }
       let content = src.slice(i + n, close).replace(/\n/g, ' ');
       if (content.length >= 2 && content[0] === ' ' && content[content.length - 1] === ' ' && content.trim() !== '') {
         content = content.slice(1, -1);
       }
       tokens.push({ t: 'code', s: content });
+      // A code span whose content holds a backtick blocks a link
+      // whose text contains it -- but ONLY when text follows the
+      // code span before the ']' (doc-16/18/20/22/23). When the code
+      // span ends exactly at the ']', the link forms (doc-03/05/33).
+      if (brackets.length > 0 && content.includes('`')) brackets[brackets.length - 1].tickCodeEnd = close + n;
       i = close + n;
       continue;
     }
@@ -743,7 +759,10 @@ function scanInline(src, defs) {
         }
       }
       let formed = false;
-      if (!hasLink) {
+      // A code span with a backtick inside blocks the link only when
+      // text follows it before the ']' (its end index is before i).
+      const blockedByTickCode = openTok.tickCodeEnd !== undefined && openTok.tickCodeEnd < i;
+      if (!hasLink && !openTok.tickBlock && !blockedByTickCode) {
         const labelRaw = src.slice(openTok.srcIndex + 1, i);
         // Labels keep backslashes raw (no escape resolution).
         const labelText = labelRaw;
@@ -803,6 +822,16 @@ function scanInline(src, defs) {
       }
       if (!formed) {
         openTok.t = 'text'; openTok.s = openTok.s;
+        // When the link fails because of a backtick in its text
+        // (unclosed run or code span with a backtick), the emphasis
+        // markers inside it stay literal too (doc-16/20/23).
+        const tickFailed = openTok.tickBlock || (openTok.tickCodeEnd !== undefined && openTok.tickCodeEnd < i);
+        if (tickFailed) {
+          for (let k = oi + 1; k < tokens.length; k++) {
+            const tk = tokens[k];
+            if (tk.t === 'delim') { tk.t = 'text'; tk.s = tk.ch.repeat(tk.n); delete tk.ch; delete tk.n; }
+          }
+        }
         pushText(']');
         i++;
       }
