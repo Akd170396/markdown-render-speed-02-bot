@@ -441,138 +441,413 @@ function tryLink(src, i, links, st, plain) {
   return { html: out, end };
 }
 
-// Resolve emphasis/delimiter runs in a token list (linked by p/n indices).
-// Delimiter nodes hold c ('*' | '_' | '~'), n (run length), open, close and
-// the linked-list links; other nodes hold their final HTML in s. When
-// `plain` is true the result is plain text (for image alt text): wrappers
-// render as their children with no tags.
-function resolveEmphasis(toks, head, plain) {
-  const stack = [];
-  // Openers blocked for a single-delimiter closer: when a delimiter that
-  // can both open and close is used as a closer, the reference treats it
-  // as an opener too (its budget grows), so an earlier opener can no
-  // longer be closed by a lone delimiter -- only a run of 2+ still can.
-  // (This is what leaves the stray `*` literal in `**a *b*c* d**` and
-  // the outer `*` literal in `*a **b**c*`.)
-  // A leftover closer -- the remainder of a run that just matched an
-  // inner opener (e.g. the last `*` of `***` after `**` took two) -- is
-  // not blocked: it is the same run continuing, so it may still close an
-  // earlier opener (this is how `*a **b***` nests em around strong).
-  const blockedSingle = new Set();
-  let leftoverNode = -1;
-  let cur = head;
-  while (cur !== -1) {
-    const node = toks[cur];
+// Run the del pass on a node list and, recursively, inside every
+// wrapper's children (a `~~` inside a strong is resolved when the
+// reference re-tokenizes the strong's content).
+function resolveDelDeep(nodes, plain) {
+  resolveDel(nodes, plain);
+  for (const node of nodes) {
+    if (node.ch) resolveDelDeep(node.ch, plain);
+  }
+}
+
+// --- emphasis resolution: the reference's emStrong algorithm ---
+//
+// The reference matches emphasis outermost-first: for each delimiter
+// run that can open (scanned left to right), it scans forward for a
+// closer using its RDelim groups and a budget (m = opener length plus
+// the lengths of intervening opener-only runs, f = rule-of-3
+// leftovers). A closer matches when the budget reaches zero; the
+// number of delimiters actually used is min(b, b+m+f), and
+// min(opener, used) decides em (odd) vs strong (even). The leftover
+// delimiters of the opener and of the used closer stay INSIDE the
+// wrapper and are resolved by recursing into its content; the unused
+// tail of the closer run (if any) stays after the wrapper and is
+// scanned again. This is what makes
+// `**removes example *input **parse**parse* release**` form the outer
+// strong first (inner `*`s stay literal) and
+// `**by command *tool*one***` keep the leftover `*` inside the strong
+// (`one*</strong>`).
+//
+// A wrapper's content is re-tokenized by the reference as a standalone
+// string, so its first/last delimiter runs are re-flanked against the
+// string edges (a `**` closing just before a `~~` is a closer inside
+// the del, but an opener-only run against the `~` outside it), and its
+// full inline treatment (em/strong/del) is resolved recursively.
+
+// Category of a char for the RDelim classification: 0 = space/boundary,
+// 1 = punctuation, 2 = not-punctuation-non-space. For `*` the reference
+// treats `~` as category 2; for `_` it is punctuation.
+function rdelimCat(ch, forStar) {
+  if (isSpaceCh(ch)) return 0;
+  if (ch === '~' && forStar) return 2;
+  if (isPunctCh(ch)) return 1;
+  return 2;
+}
+
+// RDelim group of a delimiter run, from the categories of the chars
+// before/after it (the reference's emStrongRDelimAst/Und regexes).
+// Returns 0 when the run is not a closer candidate at all.
+function rdelimGroup(c, prev, next) {
+  if (prev === '') return 0;
+  const star = c === '*';
+  const pc = rdelimCat(prev, star);
+  const nc = next === '' ? 0 : rdelimCat(next, star);
+  if (star) {
+    if (pc === 1 && nc === 0) return 1;
+    if (pc === 2 && nc !== 2) return 2;
+    if (pc !== 2 && nc === 2) return 3;
+    if (pc === 0 && nc === 1) return 4;
+    if (pc === 1 && nc === 1) return 5;
+    if (pc === 2 && nc === 2) return 6;
+    return 0;
+  }
+  if (pc === 1 && nc === 0) return 1;
+  if (pc === 2 && nc !== 2) return 2;
+  if (pc !== 2 && nc === 2) return 3;
+  if (pc === 0 && nc === 1) return 4;
+  if (pc === 1 && nc === 1) return 5;
+  return 0;
+}
+
+// Whether an opener run can also close (the reference's R): there is a
+// non-space char before it, and the char after it is punctuation (in
+// the LDelim sense, where `~` does not count) or, for `*`, the char
+// before it is not punctuation.
+function emCanClose(c, prev, next) {
+  if (prev === '' || isSpaceCh(prev)) return false;
+  if (next !== '' && isPunctCh(next) && next !== '~') return true;
+  if (c === '*') return prev !== '*' && prev !== '_' && !isPunctCh(prev);
+  return false;
+}
+
+// Flanking of a delimiter run from its neighbour chars (same rules
+// as flanking(src, start, len), but taking the chars directly).
+function flankChars(before, after) {
+  const prevSpace = before === '' || isSpaceCh(before);
+  const nextSpace = after === '' || isSpaceCh(after);
+  const prevPunct = before !== '' && isPunctCh(before);
+  const nextPunct = after !== '' && isPunctCh(after);
+  return {
+    left: !nextSpace && (!nextPunct || prevSpace || prevPunct),
+    right: !prevSpace && (!prevPunct || nextSpace || nextPunct),
+    prevPunct,
+    nextPunct,
+  };
+}
+
+// Recompute a delimiter node's open/close/group for a new neighbour
+// context (used at the edges of a wrapper's inner content).
+function reFlankEdge(node, before, after) {
+  node.before = before;
+  node.after = after;
+  node.grp = rdelimGroup(node.c, before, after);
+  const fl = flankChars(before, after);
+  node.open = fl.left;
+  node.close = fl.right;
+  if (node.c === '_') {
+    node.open = fl.left && (!fl.right || fl.prevPunct);
+    node.close = fl.right && (!fl.left || fl.nextPunct);
+  }
+}
+
+function mkDelim(node, n) {
+  return { k: 'd', c: node.c, n, open: node.open, close: node.close, grp: node.grp, before: node.before, after: node.after, y: n };
+}
+
+// The reference's RDelim first alternative: a lone delimiter between
+// two runs of the other delimiter, right at the start of the scan, is
+// skipped (it is protected by the flanking runs). For a `*` opener the
+// pattern is `__ ... * ... __`; for a `_` opener it is `** ... _ ...
+// **`. The first flanking run has exactly 2 delimiters, the middle
+// one exactly 1, the last at least 2 (a lookahead). Returns the index
+// of the middle node to skip, or -1.
+function alt1Skip(nodes, oi, c) {
+  const oc = c === '*' ? '_' : '*';
+  let seenFlank1 = false;
+  let starIdx = -1;
+  for (let j = oi + 1; j < nodes.length; j++) {
+    const node = nodes[j];
     if (node.k === 'd') {
-      if (node.close) {
-        let oi = -1;
-        for (let s = stack.length - 1; s >= 0; s--) {
-          const op = toks[stack[s]];
-          if (op.c !== node.c) continue;
-          // A lone closer cannot match an opener blocked by an earlier
-          // both-open-and-close delimiter; a run of 2+ still can. A
-          // leftover closer (same run, re-processed) is exempt.
-          if (node.n < 2 && cur !== leftoverNode && blockedSingle.has(stack[s])) continue;
-          // Rule of 3: when either delimiter can both open and close,
-          // a match whose run lengths sum to a multiple of 3 is barred
-          // unless both lengths are multiples of 3.
-          if ((op.open && op.close) || (node.open && node.close)) {
-            const sum = op.n + node.n;
-            if (sum % 3 === 0 && (op.n % 3 !== 0 || node.n % 3 !== 0)) continue;
-          }
-          oi = s;
-          break;
-        }
-        if (oi >= 0) {
-          const op = toks[stack[oi]];
-          // A '~' closer only matches when the content does not end in '~'.
-          let blocked = false;
-          if (node.c === '~') {
-            const last = toks[node.pv];
-            if (last && last.k === 't' && last.s.endsWith('~')) blocked = true;
-          }
-          if (!blocked) {
-            const use = op.n >= 2 && node.n >= 2 ? 2 : 1;
-            const kind = node.c === '~' ? 'del' : use === 2 ? 'strong' : 'em';
-            const after = node.nx;
-            const opIdx = stack[oi];
-            const closerLen = node.n;
-            op.n -= use;
-            node.n -= use;
-            const wrapIdx = toks.length;
-            const wrap = { k: kind, ch: [], pv: -1, nx: -1 };
-            // collect the children between opener and closer
-            let c = toks[opIdx].nx;
-            while (c !== -1 && c !== cur) {
-              wrap.ch.push(toks[c]);
-              c = toks[c].nx;
-            }
-            // Place the wrapper where the opener was; a leftover opener
-            // stays in the list in front of it (rendering as literal
-            // delimiters) and stays in the stack.
-            if (op.n > 0) {
-              wrap.pv = opIdx;
-              wrap.nx = node.n === 0 ? after : cur;
-              toks[opIdx].nx = wrapIdx;
-            } else {
-              wrap.pv = toks[opIdx].pv;
-              wrap.nx = node.n === 0 ? after : cur;
-              if (wrap.pv !== -1) toks[wrap.pv].nx = wrapIdx;
-              else head = wrapIdx;
-            }
-            if (node.n === 0) {
-              if (after !== -1) toks[after].pv = wrapIdx;
-            } else {
-              node.pv = wrapIdx;
-            }
-            toks.push(wrap);
-            // Delimiters between the opener and the closer are now
-            // inside the emphasis node: drop them from the stack, keeping
-            // the opener only when it still has delimiters left.
-            // If the closer could also open, every opener before the one
-            // just matched is now blocked for a lone closer -- but only
-            // when the matched opener itself cannot close, and only for
-            // an opener that needs 2 delimiters (a `**` opener) or when
-            // the closer itself is a run of 2+. A lone `*` opener before
-            // a lone `*` both-delimiter still closes (cf. doc-21).
-            if (node.open && !op.close) {
-              for (let s = 0; s < oi; s++) {
-                const outer = toks[stack[s]];
-                if (outer.c !== node.c) continue;
-                if (outer.n >= 2 || closerLen >= 2) blockedSingle.add(stack[s]);
-              }
-            }
-            stack.length = oi + (op.n > 0 ? 1 : 0);
-            // A leftover closer is re-processed: it may still match an
-            // earlier opener (this is how ***foo*** nests em around strong).
-            // Mark it as a leftover so the blockedSingle check is skipped
-            // for this same run.
-            leftoverNode = node.n > 0 ? cur : -1;
-            cur = node.n > 0 ? cur : after;
-            continue;
-          }
-        }
+      if (node.c === oc && node.n === 2 && !seenFlank1 && starIdx === -1) {
+        seenFlank1 = true;
+        continue;
       }
-      if (node.open) stack.push(cur);
-      leftoverNode = -1;
-      cur = toks[cur].nx;
-    } else {
-      cur = toks[cur].nx;
+      if (node.c === c && node.n === 1 && seenFlank1 && starIdx === -1) {
+        starIdx = j;
+        continue;
+      }
+      if (node.c === oc && node.n >= 2 && seenFlank1 && starIdx !== -1) {
+        return starIdx;
+      }
+      return -1;
+    }
+    // Non-delimiter text between the runs must contain no * or _ at
+    // all. Link/code/html nodes are masked to [aaa...] by the
+    // reference, so they never contain one; plain text nodes do.
+    if (node.k === 't' && (node.s.includes('*') || node.s.includes('_'))) return -1;
+  }
+  return -1;
+}
+
+// Find the closer for the opener at index oi in `nodes` (same char).
+// Returns { closer, use, kind, closerUsed } or null.
+function findEmCloser(nodes, oi) {
+  const op = nodes[oi];
+  const c = op.c;
+  const k = op.n;
+  let m = k, f = 0;
+  const y = op.y;
+  const R = emCanClose(c, op.before, op.after);
+  // `o`: the previous text token ends with this delimiter char (the
+  // reference breaks the scan when such a closer candidate is a
+  // both-open-and-close run). A leftover closer tail always has it
+  // set: the wrapper before it ends with the delimiter char.
+  let o = !!op.o;
+  if (!o) {
+    const prevNode = oi > 0 ? nodes[oi - 1] : null;
+    o = !!prevNode && prevNode.k === 't' && prevNode.s.length > 0 && prevNode.s[prevNode.s.length - 1] === c;
+  }
+  const skipIdx = alt1Skip(nodes, oi, c);
+  for (let j = oi + 1; j < nodes.length; j++) {
+    if (j === skipIdx) continue;
+    const node = nodes[j];
+    if (node.k !== 'd' || node.c !== c) continue;
+    const g = node.grp;
+    if (!g) continue;
+    const b = node.n;
+    if (g === 3 || g === 4) { m += b; continue; }
+    if (g === 5 || g === 6 || R) {
+      if (o && (g === 5 || g === 6)) break;
+      if (y % 3 !== 0 && (y + b) % 3 === 0) { f += b; continue; }
+    }
+    m -= b;
+    if (m > 0) continue;
+    const closerUsed = Math.min(b, b + m + f);
+    const use = Math.min(k, closerUsed) % 2 === 1 ? 1 : 2;
+    return { closer: j, use, kind: use === 1 ? 'em' : 'strong', closerUsed };
+  }
+  return null;
+}
+
+// Last raw char of an inner-content node list, for a leftover closer
+// tail's R computation ('' when empty or unknowable).
+function lastInnerChar(inner) {
+  for (let k = inner.length - 1; k >= 0; k--) {
+    const node = inner[k];
+    if (node.k === 't' || node.k === 'h') {
+      return node.s.length > 0 ? node.s[node.s.length - 1] : '';
+    }
+    if (node.k === 'd') return node.c;
+    if (node.ch) {
+      const c = lastInnerChar(node.ch);
+      if (c !== '') return c;
     }
   }
-  // render: walk from the head, delimiters left over become literal chars
-  let out = '';
-  let i = head;
-  while (i !== -1) {
-    const node = toks[i];
-    if (node.k === 'd') {
-      out += node.c.repeat(node.n);
-    } else if (node.k === 't' || node.k === 'h') {
-      out += node.s;
-    } else {
-      out += renderWrapper(node, plain);
+  return '';
+}
+
+// Build a wrapper node for `kind` ('em'/'strong'/'del') around `inner`
+// (the raw nodes between opener and closer). The inner content is
+// re-flanked at its edges and fully resolved (em/strong/del,
+// recursively) the way the reference re-tokenizes a wrapper's text.
+// Merge adjacent delimiter runs of the same char back into one run.
+// The split in resolveStar (a `**` opener with no closer becomes a
+// literal `*` plus a remainder `*`) leaves two adjacent 'd' nodes that
+// were one run in the source. The reference re-tokenizes a wrapper's
+// content from its raw text, so the run is whole again there; merging
+// here restores it. Runs are maximal in the source, so adjacent
+// same-char 'd' nodes can only come from such a split.
+function mergeAdjacentDelims(nodes) {
+  let i = 0;
+  while (i < nodes.length - 1) {
+    const a = nodes[i], b = nodes[i + 1];
+    if (a.k === 'd' && b.k === 'd' && a.c === b.c) {
+      const merged = { k: 'd', c: a.c, n: a.n + b.n, open: false, close: false, grp: 0, before: b.before, after: b.after, y: a.n + b.n };
+      reFlankEdge(merged, b.before, b.after);
+      nodes.splice(i, 2, merged);
+      continue;
     }
-    i = toks[i].nx;
+    i++;
+  }
+}
+
+function makeWrapper(kind, inner, plain) {
+  mergeAdjacentDelims(inner);
+  if (inner.length > 0 && inner[0].k === 'd') reFlankEdge(inner[0], '', inner[0].after);
+  if (inner.length > 0) {
+    const last = inner[inner.length - 1];
+    if (last.k === 'd') reFlankEdge(last, last.before, '');
+  }
+  return { k: kind, ch: resolveInline(inner, plain) };
+}
+
+// Resolve * and _ emphasis in a mutable array of nodes
+// (outermost-first). `~` delimiter nodes pass through untouched for
+// the separate del pass.
+function resolveStar(nodes, plain) {
+  let i = 0;
+  while (i < nodes.length) {
+    const node = nodes[i];
+    if (node.k === 'd' && (node.c === '*' || node.c === '_') && node.open) {
+      const match = findEmCloser(nodes, i);
+      if (match) {
+        const closerNode = nodes[match.closer];
+        const inner = nodes.slice(i + 1, match.closer);
+        // Leftover opener delimiters stay inside the wrapper, in front.
+        if (node.n > match.use) inner.unshift(mkDelim(node, node.n - match.use));
+        // Leftover used-closer delimiters stay inside, at the end.
+        if (match.closerUsed > match.use) inner.push(mkDelim(closerNode, match.closerUsed - match.use));
+        const wrap = makeWrapper(match.kind, inner, plain);
+        // Unused tail of the closer run stays after the wrapper and is
+        // scanned again as a potential opener. Its run length for the
+        // rule of 3 is the full original run (the reference's `y`
+        // walks back over the used delimiters), and its preceding
+        // char for R is the last char of the inner content.
+        const tail = closerNode.n - match.closerUsed;
+        const repl = [wrap];
+        if (tail > 0) {
+          const tailNode = mkDelim(closerNode, tail);
+          tailNode.y = closerNode.n;
+          tailNode.grp = 0;
+          tailNode.close = false;
+          tailNode.o = true;
+          // The tail can open only when the char after the run is a
+          // non-space non-punctuation char (the reference's LDelim
+          // gate, with `~` counting as non-punctuation).
+          const after = closerNode.after;
+          tailNode.open = after !== '' && !isSpaceCh(after) && !(isPunctCh(after) && after !== '~');
+          tailNode.before = lastInnerChar(inner);
+          repl.push(tailNode);
+        }
+        nodes.splice(i, match.closer - i + 1, ...repl);
+        // Continue after the wrapper; the tail (if any) is at i+1 and
+        // will be scanned as a potential opener.
+        i += 1;
+        continue;
+      }
+      if (node.n > 1) {
+        // No closer: the reference's text token consumes one delimiter
+        // char as literal text, then emStrong is retried on the
+        // remainder of the run (this is how `**foo*` yields a literal
+        // `*` plus `<em>foo</em>`). The remainder's run length for
+        // the rule of 3 is the full original run, and it carries o.
+        const lit = { k: 'd', c: node.c, n: 1, open: false, close: false, grp: 0, before: node.before, after: node.c, y: 1 };
+        const fl = flankChars(node.before, node.after);
+        let remOpen = fl.left;
+        if (node.c === '_') remOpen = fl.left && (!fl.right || fl.prevPunct);
+        const rem = { k: 'd', c: node.c, n: node.n - 1, open: remOpen, close: false, grp: 0, before: node.before, after: node.after, y: node.n, o: true };
+        nodes.splice(i, 1, lit, rem);
+        i += 1; // point at the remainder; re-process it
+        continue;
+      }
+    }
+    i++;
+  }
+  return nodes;
+}
+
+// Resolve ~~ / ~ strikethrough in a mutable array of nodes. This is
+// the previous stack pass, kept for `~` only: a closer matches the
+// nearest opener, with the rule of 3 and the content-must-not-end-in-~
+// check. `*`/`_` nodes and wrappers are opaque.
+function resolveDel(nodes, plain) {
+  const stack = [];
+  const blockedSingle = new Set();
+  let leftoverNode = null;
+  let i = 0;
+  while (i < nodes.length) {
+    const node = nodes[i];
+    if (node.k !== 'd' || node.c !== '~') { i++; continue; }
+    if (node.close) {
+      const closerLen = node.n;
+      let oi = -1;
+      for (let s = stack.length - 1; s >= 0; s--) {
+        const op = stack[s];
+        if (op.c !== '~') continue;
+        if (node.n < 2 && node !== leftoverNode && blockedSingle.has(op)) continue;
+        if ((op.open && op.close) || (node.open && node.close)) {
+          const sum = op.n + node.n;
+          if (sum % 3 === 0 && (op.n % 3 !== 0 || node.n % 3 !== 0)) continue;
+        }
+        oi = s;
+        break;
+      }
+      if (oi >= 0) {
+        const op = stack[oi];
+        let blocked = false;
+        const last = i > 0 ? nodes[i - 1] : null;
+        if (last && last.k === 't' && last.s.endsWith('~')) blocked = true;
+        if (!blocked) {
+          const use = op.n >= 2 && node.n >= 2 ? 2 : 1;
+          const opPos = nodes.indexOf(op);
+          const closerPos = i;
+          const inner = nodes.slice(opPos + 1, closerPos);
+          const opLeft = op.n - use;
+          const closerLeft = node.n - use;
+          const wrap = makeWrapper('del', inner, plain);
+          const repl = [];
+          if (opLeft > 0) {
+            op.n = opLeft;
+            repl.push(op);
+          }
+          repl.push(wrap);
+          if (closerLeft > 0) {
+            node.n = closerLeft;
+            repl.push(node);
+          }
+          if (node.open && !op.close) {
+            for (let s = 0; s < oi; s++) {
+              const outer = stack[s];
+              if (outer.c !== '~') continue;
+              if (outer.n >= 2 || closerLen >= 2) blockedSingle.add(outer);
+            }
+          }
+          nodes.splice(opPos, closerPos - opPos + 1, ...repl);
+          stack.length = oi + (opLeft > 0 ? 1 : 0);
+          leftoverNode = closerLeft > 0 ? node : null;
+          // Continue at the leftover closer (re-process it) or just
+          // after the wrapper.
+          i = opPos + repl.length - (closerLeft > 0 ? 1 : 0);
+          continue;
+        }
+      }
+    }
+    if (node.open) stack.push(node);
+    leftoverNode = null;
+    i++;
+  }
+  return nodes;
+}
+
+// Fully resolve a node list: * / _ emphasis first, then ~~ / ~
+// strikethrough. Wrappers formed by either pass carry fully resolved
+// children (via makeWrapper), so no separate deep pass is needed.
+function resolveInline(nodes, plain) {
+  resolveStar(nodes, plain);
+  resolveDel(nodes, plain);
+  return nodes;
+}
+
+// Resolve emphasis/delimiter runs in a token list (linked by p/n
+// indices). Delimiter nodes hold c ('*' | '_' | '~'), n (run length),
+// open, close, grp (RDelim group), before/after (neighbour chars) and
+// y (run length for the rule of 3); other nodes hold their final HTML
+// in s. When `plain` is true the result is plain text (for image alt
+// text): wrappers render as their children with no tags.
+function resolveEmphasis(toks, head, plain) {
+  const nodes = [];
+  let cur = head;
+  while (cur !== -1) {
+    nodes.push(toks[cur]);
+    cur = toks[cur].nx;
+  }
+  resolveInline(nodes, plain);
+  let out = '';
+  for (const node of nodes) {
+    if (node.k === 'd') out += node.c.repeat(node.n);
+    else if (node.k === 't' || node.k === 'h') out += node.s;
+    else out += renderWrapper(node, plain);
   }
   return out;
 }
@@ -778,7 +1053,9 @@ function inline(src, links, st, plain) {
         canClose = fl.right && (!fl.left || fl.nextPunct);
       }
       flushText(i);
-      push({ k: 'd', c, n: len, open: canOpen, close: canClose });
+      const before = i > 0 ? src[i - 1] : '';
+      const after = j < n ? src[j] : '';
+      push({ k: 'd', c, n: len, open: canOpen, close: canClose, grp: rdelimGroup(c, before, after), before, after, y: len });
       if (c === '_') {
         if (canClose && usOpen > 0) usOpen--;
         if (canOpen) usOpen++;
@@ -799,7 +1076,7 @@ function inline(src, links, st, plain) {
       if (isMasked(i)) { i = j; continue; }
       const fl = flanking(src, i, len);
       flushText(i);
-      push({ k: 'd', c, n: len, open: fl.left, close: fl.right });
+      push({ k: 'd', c, n: len, open: fl.left, close: fl.right, grp: 0, before: i > 0 ? src[i - 1] : '', after: j < n ? src[j] : '', y: len });
       i = j;
       textStart = i;
       continue;
@@ -1719,3 +1996,4 @@ export function parse(markdown) {
   // Second pass: render with the complete definition table.
   return renderBlocks(markdown, links, false, false, undefined, false, undefined, { hasLink: false, inLink: false, inRawBlock: false }).html;
 }
+
