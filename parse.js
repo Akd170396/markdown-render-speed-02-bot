@@ -412,10 +412,17 @@ function trimAutolinkEnd(s) {
       continue;
     }
     if (ch === ')') {
-      // Remove only when the parens in the string are unbalanced.
-      let open = 0, close = 0;
-      for (let k = 0; k < end; k++) { if (s[k] === '(') open++; else if (s[k] === ')') close++; }
-      if (close > open) { end--; continue; }
+      // Keep a trailing ')' when it has a matching '(' (found by a
+      // backward depth scan from the ')'); a ')' with no match is
+      // dropped. Counting total parens is wrong: a URL may hold an
+      // unmatched ')' in its query while its trailing ')' still
+      // matches the '(' that opens a '](...)' tail.
+      let depth = 1, matched = false;
+      for (let k = end - 2; k >= 0; k--) {
+        if (s[k] === ')') depth++;
+        else if (s[k] === '(') { depth--; if (depth === 0) { matched = true; break; } }
+      }
+      if (!matched) { end--; continue; }
     }
     break;
   }
