@@ -136,7 +136,15 @@ function unescapeEntities(s) {
 // when the named entity does not exist).
 const ESCAPE_TEXT_RE = /(?:[<>"']|&(?!(?:#\d{1,7}|#[Xx][0-9A-Fa-f]{1,6}|[A-Za-z0-9]+);))/g;
 function escapeTextRaw(s) {
-  return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+  // Fast path: skip each replacement when its character is absent;
+  // most text contains none of these, and five regex passes over a
+  // long string cost more than five indexOf scans.
+  if (s.indexOf('&') >= 0) s = s.replace(/&/g, '&amp;');
+  if (s.indexOf('<') >= 0) s = s.replace(/</g, '&lt;');
+  if (s.indexOf('>') >= 0) s = s.replace(/>/g, '&gt;');
+  if (s.indexOf('"') >= 0) s = s.replace(/"/g, '&quot;');
+  if (s.indexOf("'") >= 0) s = s.replace(/'/g, '&#39;');
+  return s;
 }
 
 // Render a plain-text token: resolve backslash-escape markers first (a
@@ -1124,6 +1132,7 @@ function stripCols(L, n) {
   return { s: r.s, b: r.b, nl: L.nl };
 }
 function lineIndent(L) {
+  if (L._ind) return L._ind;
   let col = L.b, i = 0;
   while (i < L.s.length) {
     const ch = L.s[i];
@@ -1131,7 +1140,7 @@ function lineIndent(L) {
     else if (ch === '\t') { col += 4 - (col % 4); i++; }
     else break;
   }
-  return { cols: col - L.b, pos: i };
+  return (L._ind = { cols: col - L.b, pos: i });
 }
 function isBlankLine(L) {
   for (let i = 0; i < L.s.length; i++) {
@@ -1211,15 +1220,18 @@ function matchFence(L) {
   const m = /^(`{3,}|~{3,})/.exec(rest);
   if (!m) return null;
   const ch = m[1][0], len = m[1].length;
-  const info = rest.slice(len).replace(/^[ \t]+/, '').replace(/[ \t]+$/, '');
+  const info = rest.slice(len).trim();
   if (ch === '`' && info.indexOf('`') >= 0) return null;
   return { ch, len, info, ind: ind.cols };
 }
+const _closeFenceRes = {};
 function isClosingFence(L, ch, len) {
   const { ind, rest } = restAfterIndent(L);
   if (ind.cols > 3) return false;
-  const m = new RegExp('^\\' + ch + '{' + len + ',}[ \\t]*$').exec(rest);
-  return !!m;
+  const key = ch + len;
+  let re = _closeFenceRes[key];
+  if (!re) re = _closeFenceRes[key] = new RegExp('^\\' + ch + '{' + len + ',}[ \\t]*$');
+  return !!re.exec(rest);
 }
 function matchAtx(L) {
   const { ind, rest } = restAfterIndent(L);
@@ -1327,7 +1339,7 @@ function matchListMarker(L) {
   return { type, markerWidth, start, delim, contentIndent, content, indent: ind.cols, bullet: type === 'bullet' ? rest[0] : '' };
 }
 function splitTableRow(s) {
-  let t = s.replace(/^[ \t]+/, '').replace(/[ \t]+$/, '');
+  let t = s.trim();
   if (t.startsWith('|')) t = t.slice(1);
   // A trailing '|' is the row's closing pipe unless escaped by an odd
   // number of backslashes (\\| is a literal backslash + a real pipe).
@@ -1347,7 +1359,7 @@ function splitTableRow(s) {
     cur += ch;
   }
   cells.push(cur);
-  return cells.map((c) => c.replace(/^[ \t]+/, '').replace(/[ \t]+$/, ''));
+  return cells.map((c) => c.trim());
 }
 function matchTableDelim(L) {
   const { ind, rest } = restAfterIndent(L);
@@ -1481,7 +1493,17 @@ function parseFenced(lines, i) {
   const strip = f.ch === '~' ? 0 : f.ind;
   while (j < lines.length) {
     if (isClosingFence(lines[j], f.ch, f.len)) break;
-    content.push(stripCols(lines[j], strip).s);
+    // A content line starting with a tab is expanded at the column
+    // after the fence indent, not at its raw column: the fence's own
+    // indent is part of the line's column, so a tab at col 0 in a
+    // fence with indent 2 has width 2 and is fully consumed by the
+    // strip (doc-13/17), not left as a 2-space remainder.
+    let cl = lines[j];
+    if (cl.s[0] === '\t' && strip > 0) {
+      const w = 4 - ((cl.b + strip) % 4);
+      if (w <= strip) cl = { s: cl.s.slice(1), b: cl.b + w, nl: cl.nl };
+    }
+    content.push(stripCols(cl, strip).s);
     j++;
   }
   const end = j < lines.length ? j + 1 : j;
