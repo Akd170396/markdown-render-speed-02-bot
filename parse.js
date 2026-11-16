@@ -931,6 +931,10 @@ function resolveDelimiters(tokens) {
         let codeAfter = false;
         for (let m = ci + 1; m < tokens.length; m++) {
           if (tokens[m].t === 'code') { codeAfter = true; break; }
+          // A code span nested inside a later link's text counts too,
+          // but only for a multi-star closer (doc-16's '***'); a
+          // simple '*markdown*' still forms despite it (doc-33).
+          if (closer.n >= 2 && tokens[m].t === 'link' && tokens[m].html && tokens[m].html.includes('<code>')) { codeAfter = true; break; }
         }
         if (codeAfter) break;
       }
