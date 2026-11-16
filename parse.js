@@ -598,6 +598,12 @@ function scanInline(src, defs) {
   const tokens = [];
   const brackets = [];
   let i = 0;
+  // Set after a link forms whose text holds a literal backtick
+  // (an unbalanced backtick run); cleared by the next code span.
+  // Emphasis delimiters seen while it is set are marked; they only
+  // fail to form when a code span follows them (marked suppresses
+  // emphasis between such a link and the next code span).
+  let afterTickLink = false;
 
   function pushText(s) {
     if (!s) return;
@@ -606,7 +612,7 @@ function scanInline(src, defs) {
     else tokens.push({ t: 'text', s });
   }
   function pushDelim(ch, n) {
-    tokens.push({ t: 'delim', ch, n, canOpen: false, canClose: false });
+    tokens.push({ t: 'delim', ch, n, canOpen: false, canClose: false, tickLink: afterTickLink });
   }
 
   // Consume a run of plain text starting at i, stopping at the next
@@ -785,6 +791,13 @@ function scanInline(src, defs) {
             tokens.splice(oi, tokens.length - oi, linkTok);
             i = end;
             formed = true;
+            // Only an UNESCAPED backtick in the link text marks it
+            // (an escaped \` is not an unbalanced backtick run).
+            if (linkTok.t === 'link') {
+              for (let k = 0; k < plain.length; k++) {
+                if (plain[k] === '`' && plain[k - 1] !== '') { afterTickLink = true; break; }
+              }
+            }
           }
         }
       }
@@ -881,6 +894,17 @@ function resolveDelimiters(tokens) {
     while (closer.n > 0 && closer.canClose) {
       const ci = tokens.indexOf(closer);
       if (ci < 0) break;
+      // A delimiter marked by a backtick-link only fails to form when
+      // a code span follows it (marked suppresses emphasis between
+      // such a link and the next code span); without a later code
+      // span the emphasis forms normally.
+      if (closer.tickLink) {
+        let codeAfter = false;
+        for (let m = ci + 1; m < tokens.length; m++) {
+          if (tokens[m].t === 'code') { codeAfter = true; break; }
+        }
+        if (codeAfter) break;
+      }
       let opener = null, oi = -1;
       // An opener inside an already-formed emphasis cannot pair with a
       // closer outside it (and vice versa): track the emphasis depth
